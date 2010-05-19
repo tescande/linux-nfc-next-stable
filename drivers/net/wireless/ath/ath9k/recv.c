@@ -18,6 +18,9 @@
 #include "ar9003_mac.h"
 
 #define SKB_CB_ATHBUF(__skb)	(*((struct ath_buf **)__skb->cb))
+#define ATH9K_CHECK_AUTO_SLEEP(__sc) \
+	(__sc->ps_enabled && \
+	(__sc->sc_ah->caps.hw_caps & ATH9K_HW_CAP_AUTOSLEEP))
 
 static struct ieee80211_hw * ath_get_virt_hw(struct ath_softc *sc,
 					     struct ieee80211_hdr *hdr)
@@ -616,8 +619,8 @@ static void ath_rx_ps(struct ath_softc *sc, struct sk_buff *skb)
 	hdr = (struct ieee80211_hdr *)skb->data;
 
 	/* Process Beacon and CAB receive in PS state */
-	if ((sc->ps_flags & PS_WAIT_FOR_BEACON) &&
-	    ieee80211_is_beacon(hdr->frame_control))
+	if (((sc->ps_flags & PS_WAIT_FOR_BEACON) || ATH9K_CHECK_AUTO_SLEEP(sc))
+	    && ieee80211_is_beacon(hdr->frame_control))
 		ath_rx_ps_beacon(sc, skb);
 	else if ((sc->ps_flags & PS_WAIT_FOR_CAB) &&
 		 (ieee80211_is_data(hdr->frame_control) ||
@@ -932,9 +935,10 @@ int ath_rx_tasklet(struct ath_softc *sc, int flush, bool hp)
 			sc->rx.rxotherant = 0;
 		}
 
-		if (unlikely(sc->ps_flags & (PS_WAIT_FOR_BEACON |
-					     PS_WAIT_FOR_CAB |
-					     PS_WAIT_FOR_PSPOLL_DATA)))
+		if (unlikely(ATH9K_CHECK_AUTO_SLEEP(sc) ||
+			     (sc->ps_flags & (PS_WAIT_FOR_BEACON |
+					      PS_WAIT_FOR_CAB |
+					      PS_WAIT_FOR_PSPOLL_DATA))))
 			ath_rx_ps(sc, skb);
 
 		ath_rx_send_to_mac80211(hw, sc, skb, rxs);
