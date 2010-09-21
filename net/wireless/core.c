@@ -319,8 +319,7 @@ static void cfg80211_event_work(struct work_struct *work)
 
 struct wiphy *wiphy_new(const struct cfg80211_ops *ops, int sizeof_priv)
 {
-	static int wiphy_counter;
-
+	int i;
 	struct cfg80211_registered_device *rdev;
 	int alloc_size;
 
@@ -342,12 +341,18 @@ struct wiphy *wiphy_new(const struct cfg80211_ops *ops, int sizeof_priv)
 
 	mutex_lock(&cfg80211_mutex);
 
-	rdev->wiphy_idx = wiphy_counter++;
+	/* 64k wiphy devices is enough for anyone! */
+	for (i = 0; i < 0xFFFF; i++) {
+		if (!cfg80211_rdev_by_wiphy_idx(i))
+			break;
+	}
+	if (i == 0xFFFF)
+		i = -1; /* invalid */
+	rdev->wiphy_idx = i;
 
 	if (unlikely(!wiphy_idx_valid(rdev->wiphy_idx))) {
-		wiphy_counter--;
 		mutex_unlock(&cfg80211_mutex);
-		/* ugh, wrapped! */
+		/* ugh, too many devices already! */
 		kfree(rdev);
 		return NULL;
 	}
