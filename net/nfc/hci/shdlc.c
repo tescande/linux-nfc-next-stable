@@ -222,7 +222,7 @@ static void nfc_shdlc_rcv_i_frame(struct nfc_shdlc *shdlc,
 
 	if (shdlc->t1_active == false) {
 		shdlc->t1_active = true;
-		mod_timer(&shdlc->t1_timer,
+		mod_timer(&shdlc->t1_timer, jiffies +
 			  msecs_to_jiffies(SHDLC_T1_VALUE_MS(shdlc->w)));
 		pr_debug("(re)Start T1(send ack)\n");
 	}
