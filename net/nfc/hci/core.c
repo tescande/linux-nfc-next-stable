@@ -233,7 +233,7 @@ static int nfc_hci_target_discovered(struct nfc_hci_dev *hdev, u8 gate)
 			goto exit;
 		}
 
-		memcpy (targets->nfcid1, uid_skb->data, uid_skb->len);
+		memcpy(targets->nfcid1, uid_skb->data, uid_skb->len);
 		targets->nfcid1_len = uid_skb->len;
 
 		if (hdev->ops->complete_target_discovered) {

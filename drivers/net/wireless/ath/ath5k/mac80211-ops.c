@@ -207,8 +207,8 @@ ath5k_config(struct ieee80211_hw *hw, u32 changed)
 	}
 
 	if ((changed & IEEE80211_CONF_CHANGE_POWER) &&
-	(ah->power_level != conf->power_level)) {
-		ah->power_level = conf->power_level;
+	(ah->ah_txpower.txp_requested != conf->power_level)) {
+		ah->ah_txpower.txp_requested = conf->power_level;
 
 		/* Half dB steps */
 		ath5k_hw_set_txpower_limit(ah, (conf->power_level * 2));
@@ -594,7 +594,7 @@ ath5k_conf_tx(struct ieee80211_hw *hw, struct ieee80211_vif *vif, u16 queue,
 	qi.tqi_aifs = params->aifs;
 	qi.tqi_cw_min = params->cw_min;
 	qi.tqi_cw_max = params->cw_max;
-	qi.tqi_burst_time = params->txop;
+	qi.tqi_burst_time = params->txop * 32;
 
 	ATH5K_DBG(ah, ATH5K_DEBUG_ANY,
 		  "Configure tx [queue %d],  "

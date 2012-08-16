@@ -25,7 +25,6 @@
 #ifndef __HCI_CORE_H
 #define __HCI_CORE_H
 
-#include <linux/interrupt.h>
 #include <net/bluetooth/hci.h>
 
 /* HCI priority */
@@ -65,7 +64,7 @@ struct discovery_state {
 		DISCOVERY_RESOLVING,
 		DISCOVERY_STOPPING,
 	} state;
-	struct list_head	all;		/* All devices found during inquiry */
+	struct list_head	all;	/* All devices found during inquiry */
 	struct list_head	unknown;	/* Name state not known */
 	struct list_head	resolve;	/* Name needs to be resolved */
 	__u32			timestamp;
@@ -105,7 +104,7 @@ struct link_key {
 	struct list_head list;
 	bdaddr_t bdaddr;
 	u8 type;
-	u8 val[16];
+	u8 val[HCI_LINK_KEY_SIZE];
 	u8 pin_len;
 };
 
@@ -114,12 +113,6 @@ struct oob_data {
 	bdaddr_t bdaddr;
 	u8 hash[16];
 	u8 randomizer[16];
-};
-
-struct adv_entry {
-	struct list_head list;
-	bdaddr_t bdaddr;
-	u8 bdaddr_type;
 };
 
 struct le_scan_params {
@@ -333,6 +326,7 @@ struct hci_conn {
 	void		*l2cap_data;
 	void		*sco_data;
 	void		*smp_conn;
+	struct amp_mgr	*amp_mgr;
 
 	struct hci_conn	*link;
 
@@ -356,15 +350,16 @@ extern rwlock_t hci_cb_list_lock;
 
 /* ----- HCI interface to upper protocols ----- */
 extern int l2cap_connect_ind(struct hci_dev *hdev, bdaddr_t *bdaddr);
-extern int l2cap_connect_cfm(struct hci_conn *hcon, u8 status);
+extern void l2cap_connect_cfm(struct hci_conn *hcon, u8 status);
 extern int l2cap_disconn_ind(struct hci_conn *hcon);
-extern int l2cap_disconn_cfm(struct hci_conn *hcon, u8 reason);
+extern void l2cap_disconn_cfm(struct hci_conn *hcon, u8 reason);
 extern int l2cap_security_cfm(struct hci_conn *hcon, u8 status, u8 encrypt);
-extern int l2cap_recv_acldata(struct hci_conn *hcon, struct sk_buff *skb, u16 flags);
+extern int l2cap_recv_acldata(struct hci_conn *hcon, struct sk_buff *skb,
+			      u16 flags);
 
 extern int sco_connect_ind(struct hci_dev *hdev, bdaddr_t *bdaddr);
-extern int sco_connect_cfm(struct hci_conn *hcon, __u8 status);
-extern int sco_disconn_cfm(struct hci_conn *hcon, __u8 reason);
+extern void sco_connect_cfm(struct hci_conn *hcon, __u8 status);
+extern void sco_disconn_cfm(struct hci_conn *hcon, __u8 reason);
 extern int sco_recv_scodata(struct hci_conn *hcon, struct sk_buff *skb);
 
 /* ----- Inquiry cache ----- */
@@ -429,8 +424,8 @@ enum {
 static inline bool hci_conn_ssp_enabled(struct hci_conn *conn)
 {
 	struct hci_dev *hdev = conn->hdev;
-	return (test_bit(HCI_SSP_ENABLED, &hdev->dev_flags) &&
-				test_bit(HCI_CONN_SSP_ENABLED, &conn->flags));
+	return test_bit(HCI_SSP_ENABLED, &hdev->dev_flags) &&
+	       test_bit(HCI_CONN_SSP_ENABLED, &conn->flags);
 }
 
 static inline void hci_conn_hash_init(struct hci_dev *hdev)
@@ -586,18 +581,22 @@ void hci_conn_put_device(struct hci_conn *conn);
 
 static inline void hci_conn_hold(struct hci_conn *conn)
 {
+	BT_DBG("hcon %p orig refcnt %d", conn, atomic_read(&conn->refcnt));
+
 	atomic_inc(&conn->refcnt);
 	cancel_delayed_work(&conn->disc_work);
 }
 
 static inline void hci_conn_put(struct hci_conn *conn)
 {
+	BT_DBG("hcon %p orig refcnt %d", conn, atomic_read(&conn->refcnt));
+
 	if (atomic_dec_and_test(&conn->refcnt)) {
 		unsigned long timeo;
 		if (conn->type == ACL_LINK || conn->type == LE_LINK) {
 			del_timer(&conn->idle_timer);
 			if (conn->state == BT_CONNECTED) {
-				timeo = msecs_to_jiffies(conn->disc_timeout);
+				timeo = conn->disc_timeout;
 				if (!conn->out)
 					timeo *= 2;
 			} else {
@@ -640,6 +639,19 @@ static inline void hci_set_drvdata(struct hci_dev *hdev, void *data)
 	dev_set_drvdata(&hdev->dev, data);
 }
 
+/* hci_dev_list shall be locked */
+static inline uint8_t __hci_num_ctrl(void)
+{
+	uint8_t count = 0;
+	struct list_head *p;
+
+	list_for_each(p, &hci_dev_list) {
+		count++;
+	}
+
+	return count;
+}
+
 struct hci_dev *hci_dev_get(int index);
 struct hci_dev *hci_get_route(bdaddr_t *src, bdaddr_t *dst);
 
@@ -661,7 +673,8 @@ int hci_get_conn_info(struct hci_dev *hdev, void __user *arg);
 int hci_get_auth_info(struct hci_dev *hdev, void __user *arg);
 int hci_inquiry(void __user *arg);
 
-struct bdaddr_list *hci_blacklist_lookup(struct hci_dev *hdev, bdaddr_t *bdaddr);
+struct bdaddr_list *hci_blacklist_lookup(struct hci_dev *hdev,
+					 bdaddr_t *bdaddr);
 int hci_blacklist_clear(struct hci_dev *hdev);
 int hci_blacklist_add(struct hci_dev *hdev, bdaddr_t *bdaddr, u8 type);
 int hci_blacklist_del(struct hci_dev *hdev, bdaddr_t *bdaddr, u8 type);
@@ -1035,7 +1048,7 @@ int mgmt_discovering(struct hci_dev *hdev, u8 discovering);
 int mgmt_interleaved_discovery(struct hci_dev *hdev);
 int mgmt_device_blocked(struct hci_dev *hdev, bdaddr_t *bdaddr, u8 type);
 int mgmt_device_unblocked(struct hci_dev *hdev, bdaddr_t *bdaddr, u8 type);
-
+bool mgmt_valid_hdev(struct hci_dev *hdev);
 int mgmt_new_ltk(struct hci_dev *hdev, struct smp_ltk *key, u8 persistent);
 
 /* HCI info for socket */

@@ -447,7 +447,10 @@ int mwifiex_process_event(struct mwifiex_adapter *adapter)
 			priv = mwifiex_get_priv(adapter, MWIFIEX_BSS_ROLE_ANY);
 	}
 
-	ret = mwifiex_process_sta_event(priv);
+	if (priv->bss_role == MWIFIEX_BSS_ROLE_UAP)
+		ret = mwifiex_process_uap_event(priv);
+	else
+		ret = mwifiex_process_sta_event(priv);
 
 	adapter->event_cause = 0;
 	adapter->event_skb = NULL;
@@ -578,6 +581,7 @@ int mwifiex_send_cmd_async(struct mwifiex_private *priv, uint16_t cmd_no,
 	} else {
 		adapter->cmd_queued = cmd_node;
 		mwifiex_insert_cmd_to_pending_q(adapter, cmd_node, true);
+		queue_work(adapter->workqueue, &adapter->main_work);
 	}
 
 	return ret;
@@ -1102,7 +1106,8 @@ int mwifiex_ret_802_11_hs_cfg(struct mwifiex_private *priv,
 		&resp->params.opt_hs_cfg;
 	uint32_t conditions = le32_to_cpu(phs_cfg->params.hs_config.conditions);
 
-	if (phs_cfg->action == cpu_to_le16(HS_ACTIVATE)) {
+	if (phs_cfg->action == cpu_to_le16(HS_ACTIVATE) &&
+	    adapter->iface_type == MWIFIEX_SDIO) {
 		mwifiex_hs_activated_event(priv, true);
 		return 0;
 	} else {
@@ -1114,6 +1119,9 @@ int mwifiex_ret_802_11_hs_cfg(struct mwifiex_private *priv,
 	}
 	if (conditions != HOST_SLEEP_CFG_CANCEL) {
 		adapter->is_hs_configured = true;
+		if (adapter->iface_type == MWIFIEX_USB ||
+		    adapter->iface_type == MWIFIEX_PCIE)
+			mwifiex_hs_activated_event(priv, true);
 	} else {
 		adapter->is_hs_configured = false;
 		if (adapter->hs_activated)
