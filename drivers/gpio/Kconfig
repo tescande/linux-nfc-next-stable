@@ -294,7 +294,7 @@ config GPIO_MAX732X_IRQ
 
 config GPIO_MC9S08DZ60
 	bool "MX35 3DS BOARD MC9S08DZ60 GPIO functions"
-	depends on I2C && MACH_MX35_3DS
+	depends on I2C=y && MACH_MX35_3DS
 	help
 	  Select this to enable the MC9S08DZ60 GPIO driver
 
@@ -596,6 +596,13 @@ config GPIO_AB8500
 	depends on AB8500_CORE && BROKEN
 	help
 	  Select this to enable the AB8500 IC GPIO driver
+
+config GPIO_TPS6586X
+	bool "TPS6586X GPIO"
+	depends on MFD_TPS6586X
+	help
+	  Select this option to enable GPIO driver for the TPS6586X
+	  chip family.
 
 config GPIO_TPS65910
 	bool "TPS65910 GPIO"
