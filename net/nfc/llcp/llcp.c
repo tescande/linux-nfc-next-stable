@@ -92,7 +92,8 @@ static void nfc_llcp_socket_release(struct nfc_llcp_local *local, bool listen)
 			struct nfc_llcp_sock *lsk, *n;
 			struct sock *accept_sk;
 
-			list_for_each_entry_safe(lsk, n, &llcp_sock->accept_queue,
+			list_for_each_entry_safe(lsk, n,
+						 &llcp_sock->accept_queue,
 						 accept_queue) {
 				accept_sk = &lsk->sk;
 				bh_lock_sock(accept_sk);
@@ -1163,7 +1164,7 @@ static void nfc_llcp_recv_snl(struct nfc_llcp_local *local,
 	tlv_len = skb->len - LLCP_HEADER_SIZE;
 	offset = 0;
 
-	while(offset < tlv_len) {
+	while (offset < tlv_len) {
 		type = tlv[0];
 		length = tlv[1];
 
@@ -1220,7 +1221,7 @@ static void nfc_llcp_recv_snl(struct nfc_llcp_local *local,
 
 			pr_debug("%p %d\n", llcp_sock, sap);
 
-		send_snl:
+send_snl:
 			nfc_llcp_send_snl(local, tid, sap);
 			break;
 
