@@ -110,7 +110,6 @@ static int sctp_do_bind(struct sock *, union sctp_addr *, int);
 static int sctp_autobind(struct sock *sk);
 static void sctp_sock_migrate(struct sock *, struct sock *,
 			      struct sctp_association *, sctp_socket_type_t);
-static char *sctp_hmac_alg = SCTP_COOKIE_HMAC_ALG;
 
 extern struct kmem_cache *sctp_bucket_cachep;
 extern long sysctl_sctp_mem[3];
@@ -336,6 +335,7 @@ static struct sctp_af *sctp_sockaddr_af(struct sctp_sock *opt,
 /* Bind a local address either to an endpoint or to an association.  */
 SCTP_STATIC int sctp_do_bind(struct sock *sk, union sctp_addr *addr, int len)
 {
+	struct net *net = sock_net(sk);
 	struct sctp_sock *sp = sctp_sk(sk);
 	struct sctp_endpoint *ep = sp->ep;
 	struct sctp_bind_addr *bp = &ep->base.bind_addr;
@@ -379,7 +379,8 @@ SCTP_STATIC int sctp_do_bind(struct sock *sk, union sctp_addr *addr, int len)
 		}
 	}
 
-	if (snum && snum < PROT_SOCK && !capable(CAP_NET_BIND_SERVICE))
+	if (snum && snum < PROT_SOCK &&
+	    !ns_capable(net->user_ns, CAP_NET_BIND_SERVICE))
 		return -EACCES;
 
 	/* See if the address matches any of the addresses we may have
@@ -974,7 +975,7 @@ SCTP_STATIC int sctp_setsockopt_bindx(struct sock* sk,
 	void *addr_buf;
 	struct sctp_af *af;
 
-	SCTP_DEBUG_PRINTK("sctp_setsocktopt_bindx: sk %p addrs %p"
+	SCTP_DEBUG_PRINTK("sctp_setsockopt_bindx: sk %p addrs %p"
 			  " addrs_size %d opt %d\n", sk, addrs, addrs_size, op);
 
 	if (unlikely(addrs_size <= 0))
@@ -1162,7 +1163,7 @@ static int __sctp_connect(struct sock* sk,
 				 * be permitted to open new associations.
 				 */
 				if (ep->base.bind_addr.port < PROT_SOCK &&
-				    !capable(CAP_NET_BIND_SERVICE)) {
+				    !ns_capable(net->user_ns, CAP_NET_BIND_SERVICE)) {
 					err = -EACCES;
 					goto out_free;
 				}
@@ -1791,7 +1792,7 @@ SCTP_STATIC int sctp_sendmsg(struct kiocb *iocb, struct sock *sk,
 			 * associations.
 			 */
 			if (ep->base.bind_addr.port < PROT_SOCK &&
-			    !capable(CAP_NET_BIND_SERVICE)) {
+			    !ns_capable(net->user_ns, CAP_NET_BIND_SERVICE)) {
 				err = -EACCES;
 				goto out_unlock;
 			}
@@ -1915,8 +1916,8 @@ SCTP_STATIC int sctp_sendmsg(struct kiocb *iocb, struct sock *sk,
 
 	/* Break the message into multiple chunks of maximum size. */
 	datamsg = sctp_datamsg_from_user(asoc, sinfo, msg, msg_len);
-	if (!datamsg) {
-		err = -ENOMEM;
+	if (IS_ERR(datamsg)) {
+		err = PTR_ERR(datamsg);
 		goto out_free;
 	}
 
@@ -3889,6 +3890,8 @@ SCTP_STATIC int sctp_init_sock(struct sock *sk)
 
 	sp->default_rcv_context = 0;
 	sp->max_burst = net->sctp.max_burst;
+
+	sp->sctp_hmac_alg = net->sctp.sctp_hmac_alg;
 
 	/* Initialize default setup parameters. These parameters
 	 * can be modified with the SCTP_INITMSG socket option or
@@ -5981,13 +5984,15 @@ SCTP_STATIC int sctp_listen_start(struct sock *sk, int backlog)
 	struct sctp_sock *sp = sctp_sk(sk);
 	struct sctp_endpoint *ep = sp->ep;
 	struct crypto_hash *tfm = NULL;
+	char alg[32];
 
 	/* Allocate HMAC for generating cookie. */
-	if (!sctp_sk(sk)->hmac && sctp_hmac_alg) {
-		tfm = crypto_alloc_hash(sctp_hmac_alg, 0, CRYPTO_ALG_ASYNC);
+	if (!sp->hmac && sp->sctp_hmac_alg) {
+		sprintf(alg, "hmac(%s)", sp->sctp_hmac_alg);
+		tfm = crypto_alloc_hash(alg, 0, CRYPTO_ALG_ASYNC);
 		if (IS_ERR(tfm)) {
 			net_info_ratelimited("failed to load transform for %s: %ld\n",
-					     sctp_hmac_alg, PTR_ERR(tfm));
+					     sp->sctp_hmac_alg, PTR_ERR(tfm));
 			return -ENOSYS;
 		}
 		sctp_sk(sk)->hmac = tfm;

@@ -176,8 +176,10 @@
 #define PTYPE_HASH_MASK	(PTYPE_HASH_SIZE - 1)
 
 static DEFINE_SPINLOCK(ptype_lock);
+static DEFINE_SPINLOCK(offload_lock);
 static struct list_head ptype_base[PTYPE_HASH_SIZE] __read_mostly;
 static struct list_head ptype_all __read_mostly;	/* Taps */
+static struct list_head offload_base __read_mostly;
 
 /*
  * The @dev_base_head list is protected by @dev_base_lock and the rtnl
@@ -200,6 +202,8 @@ static struct list_head ptype_all __read_mostly;	/* Taps */
  */
 DEFINE_RWLOCK(dev_base_lock);
 EXPORT_SYMBOL(dev_base_lock);
+
+DEFINE_SEQLOCK(devnet_rename_seq);
 
 static inline void dev_base_seq_inc(struct net *net)
 {
@@ -469,6 +473,82 @@ void dev_remove_pack(struct packet_type *pt)
 	synchronize_net();
 }
 EXPORT_SYMBOL(dev_remove_pack);
+
+
+/**
+ *	dev_add_offload - register offload handlers
+ *	@po: protocol offload declaration
+ *
+ *	Add protocol offload handlers to the networking stack. The passed
+ *	&proto_offload is linked into kernel lists and may not be freed until
+ *	it has been removed from the kernel lists.
+ *
+ *	This call does not sleep therefore it can not
+ *	guarantee all CPU's that are in middle of receiving packets
+ *	will see the new offload handlers (until the next received packet).
+ */
+void dev_add_offload(struct packet_offload *po)
+{
+	struct list_head *head = &offload_base;
+
+	spin_lock(&offload_lock);
+	list_add_rcu(&po->list, head);
+	spin_unlock(&offload_lock);
+}
+EXPORT_SYMBOL(dev_add_offload);
+
+/**
+ *	__dev_remove_offload	 - remove offload handler
+ *	@po: packet offload declaration
+ *
+ *	Remove a protocol offload handler that was previously added to the
+ *	kernel offload handlers by dev_add_offload(). The passed &offload_type
+ *	is removed from the kernel lists and can be freed or reused once this
+ *	function returns.
+ *
+ *      The packet type might still be in use by receivers
+ *	and must not be freed until after all the CPU's have gone
+ *	through a quiescent state.
+ */
+void __dev_remove_offload(struct packet_offload *po)
+{
+	struct list_head *head = &offload_base;
+	struct packet_offload *po1;
+
+	spin_lock(&offload_lock);
+
+	list_for_each_entry(po1, head, list) {
+		if (po == po1) {
+			list_del_rcu(&po->list);
+			goto out;
+		}
+	}
+
+	pr_warn("dev_remove_offload: %p not found\n", po);
+out:
+	spin_unlock(&offload_lock);
+}
+EXPORT_SYMBOL(__dev_remove_offload);
+
+/**
+ *	dev_remove_offload	 - remove packet offload handler
+ *	@po: packet offload declaration
+ *
+ *	Remove a packet offload handler that was previously added to the kernel
+ *	offload handlers by dev_add_offload(). The passed &offload_type is
+ *	removed from the kernel lists and can be freed or reused once this
+ *	function returns.
+ *
+ *	This call sleeps to guarantee that no CPU is looking at the packet
+ *	type after return.
+ */
+void dev_remove_offload(struct packet_offload *po)
+{
+	__dev_remove_offload(po);
+
+	synchronize_net();
+}
+EXPORT_SYMBOL(dev_remove_offload);
 
 /******************************************************************************
 
@@ -1013,21 +1093,30 @@ int dev_change_name(struct net_device *dev, const char *newname)
 	if (dev->flags & IFF_UP)
 		return -EBUSY;
 
-	if (strncmp(newname, dev->name, IFNAMSIZ) == 0)
+	write_seqlock(&devnet_rename_seq);
+
+	if (strncmp(newname, dev->name, IFNAMSIZ) == 0) {
+		write_sequnlock(&devnet_rename_seq);
 		return 0;
+	}
 
 	memcpy(oldname, dev->name, IFNAMSIZ);
 
 	err = dev_get_valid_name(net, dev, newname);
-	if (err < 0)
+	if (err < 0) {
+		write_sequnlock(&devnet_rename_seq);
 		return err;
+	}
 
 rollback:
 	ret = device_rename(&dev->dev, dev->name);
 	if (ret) {
 		memcpy(dev->name, oldname, IFNAMSIZ);
+		write_sequnlock(&devnet_rename_seq);
 		return ret;
 	}
+
+	write_sequnlock(&devnet_rename_seq);
 
 	write_lock_bh(&dev_base_lock);
 	hlist_del_rcu(&dev->name_hlist);
@@ -1046,6 +1135,7 @@ rollback:
 		/* err >= 0 after dev_alloc_name() or stores the first errno */
 		if (err >= 0) {
 			err = ret;
+			write_seqlock(&devnet_rename_seq);
 			memcpy(dev->name, oldname, IFNAMSIZ);
 			goto rollback;
 		} else {
@@ -1075,10 +1165,8 @@ int dev_set_alias(struct net_device *dev, const char *alias, size_t len)
 		return -EINVAL;
 
 	if (!len) {
-		if (dev->ifalias) {
-			kfree(dev->ifalias);
-			dev->ifalias = NULL;
-		}
+		kfree(dev->ifalias);
+		dev->ifalias = NULL;
 		return 0;
 	}
 
@@ -1666,7 +1754,7 @@ static inline int deliver_skb(struct sk_buff *skb,
 
 static inline bool skb_loop_sk(struct packet_type *ptype, struct sk_buff *skb)
 {
-	if (ptype->af_packet_priv == NULL)
+	if (!ptype->af_packet_priv || !skb->sk)
 		return false;
 
 	if (ptype->id_match)
@@ -1994,7 +2082,7 @@ struct sk_buff *skb_gso_segment(struct sk_buff *skb,
 	netdev_features_t features)
 {
 	struct sk_buff *segs = ERR_PTR(-EPROTONOSUPPORT);
-	struct packet_type *ptype;
+	struct packet_offload *ptype;
 	__be16 type = skb->protocol;
 	int vlan_depth = ETH_HLEN;
 	int err;
@@ -2023,18 +2111,17 @@ struct sk_buff *skb_gso_segment(struct sk_buff *skb,
 	}
 
 	rcu_read_lock();
-	list_for_each_entry_rcu(ptype,
-			&ptype_base[ntohs(type) & PTYPE_HASH_MASK], list) {
-		if (ptype->type == type && !ptype->dev && ptype->gso_segment) {
+	list_for_each_entry_rcu(ptype, &offload_base, list) {
+		if (ptype->type == type && ptype->callbacks.gso_segment) {
 			if (unlikely(skb->ip_summed != CHECKSUM_PARTIAL)) {
-				err = ptype->gso_send_check(skb);
+				err = ptype->callbacks.gso_send_check(skb);
 				segs = ERR_PTR(err);
 				if (err || skb_gso_ok(skb, features))
 					break;
 				__skb_push(skb, (skb->data -
 						 skb_network_header(skb)));
 			}
-			segs = ptype->gso_segment(skb, features);
+			segs = ptype->callbacks.gso_segment(skb, features);
 			break;
 		}
 	}
@@ -2818,8 +2905,10 @@ static int get_rps_cpu(struct net_device *dev, struct sk_buff *skb,
 		if (unlikely(tcpu != next_cpu) &&
 		    (tcpu == RPS_NO_CPU || !cpu_online(tcpu) ||
 		     ((int)(per_cpu(softnet_data, tcpu).input_queue_head -
-		      rflow->last_qtail)) >= 0))
+		      rflow->last_qtail)) >= 0)) {
+			tcpu = next_cpu;
 			rflow = set_rps_cpu(dev, skb, rflow, next_cpu);
+		}
 
 		if (tcpu != RPS_NO_CPU && cpu_online(tcpu)) {
 			*rflowp = rflow;
@@ -3444,9 +3533,9 @@ static void flush_backlog(void *arg)
 
 static int napi_gro_complete(struct sk_buff *skb)
 {
-	struct packet_type *ptype;
+	struct packet_offload *ptype;
 	__be16 type = skb->protocol;
-	struct list_head *head = &ptype_base[ntohs(type) & PTYPE_HASH_MASK];
+	struct list_head *head = &offload_base;
 	int err = -ENOENT;
 
 	if (NAPI_GRO_CB(skb)->count == 1) {
@@ -3456,10 +3545,10 @@ static int napi_gro_complete(struct sk_buff *skb)
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(ptype, head, list) {
-		if (ptype->type != type || ptype->dev || !ptype->gro_complete)
+		if (ptype->type != type || !ptype->callbacks.gro_complete)
 			continue;
 
-		err = ptype->gro_complete(skb);
+		err = ptype->callbacks.gro_complete(skb);
 		break;
 	}
 	rcu_read_unlock();
@@ -3503,12 +3592,12 @@ void napi_gro_flush(struct napi_struct *napi, bool flush_old)
 }
 EXPORT_SYMBOL(napi_gro_flush);
 
-enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
+static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
 {
 	struct sk_buff **pp = NULL;
-	struct packet_type *ptype;
+	struct packet_offload *ptype;
 	__be16 type = skb->protocol;
-	struct list_head *head = &ptype_base[ntohs(type) & PTYPE_HASH_MASK];
+	struct list_head *head = &offload_base;
 	int same_flow;
 	int mac_len;
 	enum gro_result ret;
@@ -3521,7 +3610,7 @@ enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(ptype, head, list) {
-		if (ptype->type != type || ptype->dev || !ptype->gro_receive)
+		if (ptype->type != type || !ptype->callbacks.gro_receive)
 			continue;
 
 		skb_set_network_header(skb, skb_gro_offset(skb));
@@ -3531,7 +3620,7 @@ enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
 		NAPI_GRO_CB(skb)->flush = 0;
 		NAPI_GRO_CB(skb)->free = 0;
 
-		pp = ptype->gro_receive(&napi->gro_list, skb);
+		pp = ptype->callbacks.gro_receive(&napi->gro_list, skb);
 		break;
 	}
 	rcu_read_unlock();
@@ -3594,7 +3683,6 @@ normal:
 	ret = GRO_NORMAL;
 	goto pull;
 }
-EXPORT_SYMBOL(dev_gro_receive);
 
 static inline gro_result_t
 __napi_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
@@ -3621,7 +3709,7 @@ __napi_gro_receive(struct napi_struct *napi, struct sk_buff *skb)
 	return dev_gro_receive(napi, skb);
 }
 
-gro_result_t napi_skb_finish(gro_result_t ret, struct sk_buff *skb)
+static gro_result_t napi_skb_finish(gro_result_t ret, struct sk_buff *skb)
 {
 	switch (ret) {
 	case GRO_NORMAL:
@@ -3647,7 +3735,6 @@ gro_result_t napi_skb_finish(gro_result_t ret, struct sk_buff *skb)
 
 	return ret;
 }
-EXPORT_SYMBOL(napi_skb_finish);
 
 static void skb_gro_reset_offset(struct sk_buff *skb)
 {
@@ -3699,7 +3786,7 @@ struct sk_buff *napi_get_frags(struct napi_struct *napi)
 }
 EXPORT_SYMBOL(napi_get_frags);
 
-gro_result_t napi_frags_finish(struct napi_struct *napi, struct sk_buff *skb,
+static gro_result_t napi_frags_finish(struct napi_struct *napi, struct sk_buff *skb,
 			       gro_result_t ret)
 {
 	switch (ret) {
@@ -3724,7 +3811,6 @@ gro_result_t napi_frags_finish(struct napi_struct *napi, struct sk_buff *skb,
 
 	return ret;
 }
-EXPORT_SYMBOL(napi_frags_finish);
 
 static struct sk_buff *napi_frags_skb(struct napi_struct *napi)
 {
@@ -4071,6 +4157,7 @@ static int dev_ifname(struct net *net, struct ifreq __user *arg)
 {
 	struct net_device *dev;
 	struct ifreq ifr;
+	unsigned seq;
 
 	/*
 	 *	Fetch the caller's info block.
@@ -4079,6 +4166,8 @@ static int dev_ifname(struct net *net, struct ifreq __user *arg)
 	if (copy_from_user(&ifr, arg, sizeof(struct ifreq)))
 		return -EFAULT;
 
+retry:
+	seq = read_seqbegin(&devnet_rename_seq);
 	rcu_read_lock();
 	dev = dev_get_by_index_rcu(net, ifr.ifr_ifindex);
 	if (!dev) {
@@ -4088,6 +4177,8 @@ static int dev_ifname(struct net *net, struct ifreq __user *arg)
 
 	strcpy(ifr.ifr_name, dev->name);
 	rcu_read_unlock();
+	if (read_seqretry(&devnet_rename_seq, seq))
+		goto retry;
 
 	if (copy_to_user(arg, &ifr, sizeof(struct ifreq)))
 		return -EFAULT;
@@ -5200,7 +5291,7 @@ int dev_ioctl(struct net *net, unsigned int cmd, void __user *arg)
 	case SIOCGMIIPHY:
 	case SIOCGMIIREG:
 	case SIOCSIFNAME:
-		if (!capable(CAP_NET_ADMIN))
+		if (!ns_capable(net->user_ns, CAP_NET_ADMIN))
 			return -EPERM;
 		dev_load(net, ifr.ifr_name);
 		rtnl_lock();
@@ -5221,16 +5312,25 @@ int dev_ioctl(struct net *net, unsigned int cmd, void __user *arg)
 	 *	- require strict serialization.
 	 *	- do not return a value
 	 */
+	case SIOCSIFMAP:
+	case SIOCSIFTXQLEN:
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
+		/* fall through */
+	/*
+	 *	These ioctl calls:
+	 *	- require local superuser power.
+	 *	- require strict serialization.
+	 *	- do not return a value
+	 */
 	case SIOCSIFFLAGS:
 	case SIOCSIFMETRIC:
 	case SIOCSIFMTU:
-	case SIOCSIFMAP:
 	case SIOCSIFHWADDR:
 	case SIOCSIFSLAVE:
 	case SIOCADDMULTI:
 	case SIOCDELMULTI:
 	case SIOCSIFHWBROADCAST:
-	case SIOCSIFTXQLEN:
 	case SIOCSMIIREG:
 	case SIOCBONDENSLAVE:
 	case SIOCBONDRELEASE:
@@ -5239,7 +5339,7 @@ int dev_ioctl(struct net *net, unsigned int cmd, void __user *arg)
 	case SIOCBRADDIF:
 	case SIOCBRDELIF:
 	case SIOCSHWTSTAMP:
-		if (!capable(CAP_NET_ADMIN))
+		if (!ns_capable(net->user_ns, CAP_NET_ADMIN))
 			return -EPERM;
 		/* fall through */
 	case SIOCBONDSLAVEINFOQUERY:
@@ -6264,7 +6364,6 @@ int dev_change_net_namespace(struct net_device *dev, struct net *net, const char
 		goto out;
 
 	/* Ensure the device has been registrered */
-	err = -EINVAL;
 	if (dev->reg_state != NETREG_REGISTERED)
 		goto out;
 
@@ -6661,6 +6760,8 @@ static int __init net_dev_init(void)
 	INIT_LIST_HEAD(&ptype_all);
 	for (i = 0; i < PTYPE_HASH_SIZE; i++)
 		INIT_LIST_HEAD(&ptype_base[i]);
+
+	INIT_LIST_HEAD(&offload_base);
 
 	if (register_pernet_subsys(&netdev_net_ops))
 		goto out;

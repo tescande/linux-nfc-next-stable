@@ -648,6 +648,7 @@ static void cp_tx (struct cp_private *cp)
 {
 	unsigned tx_head = cp->tx_head;
 	unsigned tx_tail = cp->tx_tail;
+	unsigned bytes_compl = 0, pkts_compl = 0;
 
 	while (tx_tail != tx_head) {
 		struct cp_desc *txd = cp->tx_ring + tx_tail;
@@ -665,6 +666,9 @@ static void cp_tx (struct cp_private *cp)
 		dma_unmap_single(&cp->pdev->dev, le64_to_cpu(txd->addr),
 				 le32_to_cpu(txd->opts1) & 0xffff,
 				 PCI_DMA_TODEVICE);
+
+		bytes_compl += skb->len;
+		pkts_compl++;
 
 		if (status & LastFrag) {
 			if (status & (TxError | TxFIFOUnder)) {
@@ -697,6 +701,7 @@ static void cp_tx (struct cp_private *cp)
 
 	cp->tx_tail = tx_tail;
 
+	netdev_completed_queue(cp->dev, pkts_compl, bytes_compl);
 	if (TX_BUFFS_AVAIL(cp) > (MAX_SKB_FRAGS + 1))
 		netif_wake_queue(cp->dev);
 }
@@ -843,6 +848,8 @@ static netdev_tx_t cp_start_xmit (struct sk_buff *skb,
 		wmb();
 	}
 	cp->tx_head = entry;
+
+	netdev_sent_queue(dev, skb->len);
 	netif_dbg(cp, tx_queued, cp->dev, "tx queued, slot %d, skblen %d\n",
 		  entry, skb->len);
 	if (TX_BUFFS_AVAIL(cp) <= (MAX_SKB_FRAGS + 1))
@@ -937,6 +944,8 @@ static void cp_stop_hw (struct cp_private *cp)
 
 	cp->rx_tail = 0;
 	cp->tx_head = cp->tx_tail = 0;
+
+	netdev_reset_queue(cp->dev);
 }
 
 static void cp_reset_hw (struct cp_private *cp)
@@ -957,28 +966,18 @@ static void cp_reset_hw (struct cp_private *cp)
 
 static inline void cp_start_hw (struct cp_private *cp)
 {
-	cpw16(CpCmd, cp->cpcmd);
-	cpw8(Cmd, RxOn | TxOn);
-}
-
-static void cp_enable_irq(struct cp_private *cp)
-{
-	cpw16_f(IntrMask, cp_intr_mask);
-}
-
-static void cp_init_hw (struct cp_private *cp)
-{
-	struct net_device *dev = cp->dev;
 	dma_addr_t ring_dma;
 
-	cp_reset_hw(cp);
+	cpw16(CpCmd, cp->cpcmd);
 
-	cpw8_f (Cfg9346, Cfg9346_Unlock);
-
-	/* Restore our idea of the MAC address. */
-	cpw32_f (MAC0 + 0, le32_to_cpu (*(__le32 *) (dev->dev_addr + 0)));
-	cpw32_f (MAC0 + 4, le32_to_cpu (*(__le32 *) (dev->dev_addr + 4)));
-
+	/*
+	 * These (at least TxRingAddr) need to be configured after the
+	 * corresponding bits in CpCmd are enabled. Datasheet v1.6 §6.33
+	 * (C+ Command Register) recommends that these and more be configured
+	 * *after* the [RT]xEnable bits in CpCmd are set. And on some hardware
+	 * it's been observed that the TxRingAddr is actually reset to garbage
+	 * when C+ mode Tx is enabled in CpCmd.
+	 */
 	cpw32_f(HiTxRingAddr, 0);
 	cpw32_f(HiTxRingAddr + 4, 0);
 
@@ -989,6 +988,34 @@ static void cp_init_hw (struct cp_private *cp)
 	ring_dma += sizeof(struct cp_desc) * CP_RX_RING_SIZE;
 	cpw32_f(TxRingAddr, ring_dma & 0xffffffff);
 	cpw32_f(TxRingAddr + 4, (ring_dma >> 16) >> 16);
+
+	/*
+	 * Strictly speaking, the datasheet says this should be enabled
+	 * *before* setting the descriptor addresses. But what, then, would
+	 * prevent it from doing DMA to random unconfigured addresses?
+	 * This variant appears to work fine.
+	 */
+	cpw8(Cmd, RxOn | TxOn);
+
+	netdev_reset_queue(cp->dev);
+}
+
+static void cp_enable_irq(struct cp_private *cp)
+{
+	cpw16_f(IntrMask, cp_intr_mask);
+}
+
+static void cp_init_hw (struct cp_private *cp)
+{
+	struct net_device *dev = cp->dev;
+
+	cp_reset_hw(cp);
+
+	cpw8_f (Cfg9346, Cfg9346_Unlock);
+
+	/* Restore our idea of the MAC address. */
+	cpw32_f (MAC0 + 0, le32_to_cpu (*(__le32 *) (dev->dev_addr + 0)));
+	cpw32_f (MAC0 + 4, le32_to_cpu (*(__le32 *) (dev->dev_addr + 4)));
 
 	cp_start_hw(cp);
 	cpw8(TxThresh, 0x06); /* XXX convert magic num to a constant */
@@ -1192,6 +1219,7 @@ static void cp_tx_timeout(struct net_device *dev)
 	cp_clean_rings(cp);
 	rc = cp_init_rings(cp);
 	cp_start_hw(cp);
+	cp_enable_irq(cp);
 
 	netif_wake_queue(dev);
 

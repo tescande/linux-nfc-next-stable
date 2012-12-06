@@ -5407,8 +5407,8 @@ static int netdev_close(struct net_device *dev)
 		/* Delay for receive task to stop scheduling itself. */
 		msleep(2000 / HZ);
 
-		tasklet_disable(&hw_priv->rx_tasklet);
-		tasklet_disable(&hw_priv->tx_tasklet);
+		tasklet_kill(&hw_priv->rx_tasklet);
+		tasklet_kill(&hw_priv->tx_tasklet);
 		free_irq(dev->irq, hw_priv->dev);
 
 		transmit_cleanup(hw_priv, 0);
@@ -5459,8 +5459,10 @@ static int prepare_hardware(struct net_device *dev)
 	rc = request_irq(dev->irq, netdev_intr, IRQF_SHARED, dev->name, dev);
 	if (rc)
 		return rc;
-	tasklet_enable(&hw_priv->rx_tasklet);
-	tasklet_enable(&hw_priv->tx_tasklet);
+	tasklet_init(&hw_priv->rx_tasklet, rx_proc_task,
+		     (unsigned long) hw_priv);
+	tasklet_init(&hw_priv->tx_tasklet, tx_proc_task,
+		     (unsigned long) hw_priv);
 
 	hw->promiscuous = 0;
 	hw->all_multi = 0;
@@ -7033,16 +7035,6 @@ static int __devinit pcidev_init(struct pci_dev *pdev,
 	spin_lock_init(&hw_priv->hwlock);
 	mutex_init(&hw_priv->lock);
 
-	/* tasklet is enabled. */
-	tasklet_init(&hw_priv->rx_tasklet, rx_proc_task,
-		(unsigned long) hw_priv);
-	tasklet_init(&hw_priv->tx_tasklet, tx_proc_task,
-		(unsigned long) hw_priv);
-
-	/* tasklet_enable will decrement the atomic counter. */
-	tasklet_disable(&hw_priv->rx_tasklet);
-	tasklet_disable(&hw_priv->tx_tasklet);
-
 	for (i = 0; i < TOTAL_PORT_NUM; i++)
 		init_waitqueue_head(&hw_priv->counter[i].counter);
 
@@ -7251,18 +7243,7 @@ static struct pci_driver pci_device_driver = {
 	.remove		= pcidev_exit
 };
 
-static int __init ksz884x_init_module(void)
-{
-	return pci_register_driver(&pci_device_driver);
-}
-
-static void __exit ksz884x_cleanup_module(void)
-{
-	pci_unregister_driver(&pci_device_driver);
-}
-
-module_init(ksz884x_init_module);
-module_exit(ksz884x_cleanup_module);
+module_pci_driver(pci_device_driver);
 
 MODULE_DESCRIPTION("KSZ8841/2 PCI network driver");
 MODULE_AUTHOR("Tristram Ha <Tristram.Ha@micrel.com>");

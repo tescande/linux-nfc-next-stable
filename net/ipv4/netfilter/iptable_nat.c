@@ -184,7 +184,8 @@ nf_nat_ipv4_out(unsigned int hooknum,
 
 		if ((ct->tuplehash[dir].tuple.src.u3.ip !=
 		     ct->tuplehash[!dir].tuple.dst.u3.ip) ||
-		    (ct->tuplehash[dir].tuple.src.u.all !=
+		    (ct->tuplehash[dir].tuple.dst.protonum != IPPROTO_ICMP &&
+		     ct->tuplehash[dir].tuple.src.u.all !=
 		     ct->tuplehash[!dir].tuple.dst.u.all))
 			if (nf_xfrm_me_harder(skb, AF_INET) < 0)
 				ret = NF_DROP;
@@ -221,6 +222,7 @@ nf_nat_ipv4_local_fn(unsigned int hooknum,
 		}
 #ifdef CONFIG_XFRM
 		else if (!(IPCB(skb)->flags & IPSKB_XFRM_TRANSFORMED) &&
+			 ct->tuplehash[dir].tuple.dst.protonum != IPPROTO_ICMP &&
 			 ct->tuplehash[dir].tuple.dst.u.all !=
 			 ct->tuplehash[!dir].tuple.src.u.all)
 			if (nf_xfrm_me_harder(skb, AF_INET) < 0)
@@ -274,9 +276,7 @@ static int __net_init iptable_nat_net_init(struct net *net)
 		return -ENOMEM;
 	net->ipv4.nat_table = ipt_register_table(net, &nf_nat_ipv4_table, repl);
 	kfree(repl);
-	if (IS_ERR(net->ipv4.nat_table))
-		return PTR_ERR(net->ipv4.nat_table);
-	return 0;
+	return PTR_RET(net->ipv4.nat_table);
 }
 
 static void __net_exit iptable_nat_net_exit(struct net *net)

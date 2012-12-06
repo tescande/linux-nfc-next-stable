@@ -105,6 +105,9 @@ int inet_sk_diag_fill(struct sock *sk, struct inet_connection_sock *icsk,
 	r->id.idiag_src[0] = inet->inet_rcv_saddr;
 	r->id.idiag_dst[0] = inet->inet_daddr;
 
+	if (nla_put_u8(skb, INET_DIAG_SHUTDOWN, sk->sk_shutdown))
+		goto errout;
+
 	/* IPv6 dual-stack sockets use inet->tos for IPv4 connections,
 	 * hence this needs to be included regardless of socket family.
 	 */
@@ -617,7 +620,7 @@ static int inet_diag_fill_req(struct sk_buff *skb, struct sock *sk,
 	r->idiag_family = sk->sk_family;
 	r->idiag_state = TCP_SYN_RECV;
 	r->idiag_timer = 1;
-	r->idiag_retrans = req->retrans;
+	r->idiag_retrans = req->num_retrans;
 
 	r->id.idiag_if = sk->sk_bound_dev_if;
 	sock_diag_save_cookie(req, r->id.idiag_cookie);
@@ -892,13 +895,16 @@ static int __inet_diag_dump(struct sk_buff *skb, struct netlink_callback *cb,
 		struct inet_diag_req_v2 *r, struct nlattr *bc)
 {
 	const struct inet_diag_handler *handler;
+	int err = 0;
 
 	handler = inet_diag_lock_handler(r->sdiag_protocol);
 	if (!IS_ERR(handler))
 		handler->dump(skb, cb, r, bc);
+	else
+		err = PTR_ERR(handler);
 	inet_diag_unlock_handler(handler);
 
-	return skb->len;
+	return err ? : skb->len;
 }
 
 static int inet_diag_dump(struct sk_buff *skb, struct netlink_callback *cb)
