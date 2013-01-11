@@ -221,7 +221,7 @@ static void nfc_llcp_symm_timer(unsigned long data)
 
 	pr_err("SYMM timeout\n");
 
-	queue_work(system_nrt_wq, &local->timeout_work);
+	schedule_work(&local->timeout_work);
 }
 
 struct nfc_llcp_local *nfc_llcp_find_local(struct nfc_dev *dev)
@@ -1287,7 +1287,7 @@ static void nfc_llcp_rx_work(struct work_struct *work)
 
 	}
 
-	queue_work(system_nrt_wq, &local->tx_work);
+	schedule_work(&local->tx_work);
 	kfree_skb(local->rx_pending);
 	local->rx_pending = NULL;
 }
@@ -1304,7 +1304,7 @@ void nfc_llcp_recv(void *data, struct sk_buff *skb, int err)
 
 	local->rx_pending = skb_get(skb);
 	del_timer(&local->link_timer);
-	queue_work(system_nrt_wq, &local->rx_work);
+	schedule_work(&local->rx_work);
 }
 
 int nfc_llcp_data_received(struct nfc_dev *dev, struct sk_buff *skb)
@@ -1317,7 +1317,7 @@ int nfc_llcp_data_received(struct nfc_dev *dev, struct sk_buff *skb)
 
 	local->rx_pending = skb_get(skb);
 	del_timer(&local->link_timer);
-	queue_work(system_nrt_wq, &local->rx_work);
+	schedule_work(&local->rx_work);
 
 	return 0;
 }
@@ -1352,7 +1352,7 @@ void nfc_llcp_mac_is_up(struct nfc_dev *dev, u32 target_idx,
 	if (rf_mode == NFC_RF_INITIATOR) {
 		pr_debug("Queueing Tx work\n");
 
-		queue_work(system_nrt_wq, &local->tx_work);
+		schedule_work(&local->tx_work);
 	} else {
 		mod_timer(&local->link_timer,
 			  jiffies + msecs_to_jiffies(local->remote_lto));
