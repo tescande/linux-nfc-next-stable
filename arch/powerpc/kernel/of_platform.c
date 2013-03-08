@@ -37,7 +37,7 @@
  * lacking some bits needed here.
  */
 
-static int __devinit of_pci_phb_probe(struct platform_device *dev)
+static int of_pci_phb_probe(struct platform_device *dev)
 {
 	struct pci_controller *phb;
 
@@ -82,7 +82,7 @@ static int __devinit of_pci_phb_probe(struct platform_device *dev)
 		return -ENXIO;
 
 	/* Claim resources. This might need some rework as well depending
-	 * wether we are doing probe-only or not, like assigning unassigned
+	 * whether we are doing probe-only or not, like assigning unassigned
 	 * resources etc...
 	 */
 	pcibios_claim_one_bus(phb->bus);
@@ -94,6 +94,9 @@ static int __devinit of_pci_phb_probe(struct platform_device *dev)
 
 	/* Add probed PCI devices to the device model */
 	pci_bus_add_devices(phb->bus);
+
+	/* sysfs files should only be added after devices are added */
+	eeh_add_sysfs_files(phb->bus);
 
 	return 0;
 }

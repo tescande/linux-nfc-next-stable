@@ -405,7 +405,6 @@ struct dwc3_event_buffer {
  * @number: endpoint number (1 - 15)
  * @type: set to bmAttributes & USB_ENDPOINT_XFERTYPE_MASK
  * @resource_index: Resource transfer index
- * @current_uf: Current uf received through last event parameter
  * @interval: the intervall on which the ISOC transfer is started
  * @name: a human readable name e.g. ep1out-bulk
  * @direction: true for TX, false for RX
@@ -439,7 +438,6 @@ struct dwc3_ep {
 	u8			number;
 	u8			type;
 	u8			resource_index;
-	u16			current_uf;
 	u32			interval;
 
 	char			name[20];
@@ -867,8 +865,5 @@ void dwc3_host_exit(struct dwc3 *dwc);
 
 int dwc3_gadget_init(struct dwc3 *dwc);
 void dwc3_gadget_exit(struct dwc3 *dwc);
-
-extern int dwc3_get_device_id(void);
-extern void dwc3_put_device_id(int id);
 
 #endif /* __DRIVERS_USB_DWC3_CORE_H */

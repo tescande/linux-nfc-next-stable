@@ -18,7 +18,7 @@
 */
 /* Uncomment to log function calls */
 /* #define DEBUG */
-#define DRIVER_VERSION "v.1.7.16"
+
 #define DRIVER_AUTHOR "Kevin Lloyd, Elina Pasheva, Matthew Safar, Rory Filer"
 #define DRIVER_DESC "USB Driver for Sierra Wireless USB modems"
 
@@ -861,19 +861,13 @@ static int sierra_open(struct tty_struct *tty, struct usb_serial_port *port)
 
 static void sierra_dtr_rts(struct usb_serial_port *port, int on)
 {
-	struct usb_serial *serial = port->serial;
 	struct sierra_port_private *portdata;
 
 	portdata = usb_get_serial_port_data(port);
 	portdata->rts_state = on;
 	portdata->dtr_state = on;
 
-	if (serial->dev) {
-		mutex_lock(&serial->disc_mutex);
-		if (!serial->disconnected)
-			sierra_send_setup(port);
-		mutex_unlock(&serial->disc_mutex);
-	}
+	sierra_send_setup(port);
 }
 
 static int sierra_startup(struct usb_serial *serial)
@@ -1078,7 +1072,6 @@ module_usb_serial_driver(serial_drivers, id_table);
 
 MODULE_AUTHOR(DRIVER_AUTHOR);
 MODULE_DESCRIPTION(DRIVER_DESC);
-MODULE_VERSION(DRIVER_VERSION);
 MODULE_LICENSE("GPL");
 
 module_param(nmea, bool, S_IRUGO | S_IWUSR);

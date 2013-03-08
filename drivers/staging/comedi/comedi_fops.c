@@ -23,7 +23,6 @@
 
 #undef DEBUG
 
-#define __NO_VERSION__
 #include "comedi_compat32.h"
 
 #include <linux/module.h>
@@ -880,6 +879,10 @@ static int check_insn_config_length(struct comedi_insn *insn,
 		if (insn->n == 5)
 			return 0;
 		break;
+	case INSN_CONFIG_DIGITAL_TRIG:
+		if (insn->n == 6)
+			return 0;
+		break;
 		/* by default we allow the insn since we don't have checks for
 		 * all possible cases yet */
 	default:
@@ -1544,8 +1547,16 @@ static long comedi_unlocked_ioctl(struct file *file, unsigned int cmd,
 	/* Device config is special, because it must work on
 	 * an unconfigured device. */
 	if (cmd == COMEDI_DEVCONFIG) {
+		if (minor >= COMEDI_NUM_BOARD_MINORS) {
+			/* Device config not appropriate on non-board minors. */
+			rc = -ENOTTY;
+			goto done;
+		}
 		rc = do_devconfig_ioctl(dev,
 					(struct comedi_devconfig __user *)arg);
+		if (rc == 0)
+			/* Evade comedi_auto_unconfig(). */
+			dev_file_info->hardware_device = NULL;
 		goto done;
 	}
 
@@ -1768,7 +1779,7 @@ static unsigned int comedi_poll(struct file *file, poll_table *wait)
 
 	mask = 0;
 	read_subdev = comedi_get_read_subdevice(dev_file_info);
-	if (read_subdev) {
+	if (read_subdev && read_subdev->async) {
 		poll_wait(file, &read_subdev->async->wait_head, wait);
 		if (!read_subdev->busy
 		    || comedi_buf_read_n_available(read_subdev->async) > 0
@@ -1778,7 +1789,7 @@ static unsigned int comedi_poll(struct file *file, poll_table *wait)
 		}
 	}
 	write_subdev = comedi_get_write_subdevice(dev_file_info);
-	if (write_subdev) {
+	if (write_subdev && write_subdev->async) {
 		poll_wait(file, &write_subdev->async->wait_head, wait);
 		comedi_buf_write_alloc(write_subdev->async,
 				       write_subdev->async->prealloc_bufsz);
@@ -1820,7 +1831,7 @@ static ssize_t comedi_write(struct file *file, const char __user *buf,
 	}
 
 	s = comedi_get_write_subdevice(dev_file_info);
-	if (s == NULL) {
+	if (s == NULL || s->async == NULL) {
 		retval = -EIO;
 		goto done;
 	}
@@ -1931,7 +1942,7 @@ static ssize_t comedi_read(struct file *file, char __user *buf, size_t nbytes,
 	}
 
 	s = comedi_get_read_subdevice(dev_file_info);
-	if (s == NULL) {
+	if (s == NULL || s->async == NULL) {
 		retval = -EIO;
 		goto done;
 	}

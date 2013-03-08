@@ -597,6 +597,7 @@ static void port_release(struct device *dev)
 	kfifo_free(&port->write_fifo);
 	kfree(port->interrupt_in_buffer);
 	kfree(port->interrupt_out_buffer);
+	tty_port_destroy(&port->port);
 	kfree(port);
 }
 
@@ -687,10 +688,20 @@ static int serial_carrier_raised(struct tty_port *port)
 static void serial_dtr_rts(struct tty_port *port, int on)
 {
 	struct usb_serial_port *p = container_of(port, struct usb_serial_port, port);
-	struct usb_serial_driver *drv = p->serial->type;
+	struct usb_serial *serial = p->serial;
+	struct usb_serial_driver *drv = serial->type;
 
-	if (drv->dtr_rts)
+	if (!drv->dtr_rts)
+		return;
+	/*
+	 * Work-around bug in the tty-layer which can result in dtr_rts
+	 * being called after a disconnect (and tty_unregister_device
+	 * has returned). Remove once bug has been squashed.
+	 */
+	mutex_lock(&serial->disc_mutex);
+	if (!serial->disconnected)
 		drv->dtr_rts(p, on);
+	mutex_unlock(&serial->disc_mutex);
 }
 
 static const struct tty_port_operations serial_port_ops = {

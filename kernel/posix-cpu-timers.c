@@ -9,6 +9,7 @@
 #include <asm/uaccess.h>
 #include <linux/kernel_stat.h>
 #include <trace/events/timer.h>
+#include <linux/random.h>
 
 /*
  * Called after updating RLIMIT_CPU to run cpu timer and update
@@ -215,30 +216,6 @@ static int cpu_clock_sample(const clockid_t which_clock, struct task_struct *p,
 		break;
 	}
 	return 0;
-}
-
-void thread_group_cputime(struct task_struct *tsk, struct task_cputime *times)
-{
-	struct signal_struct *sig = tsk->signal;
-	struct task_struct *t;
-
-	times->utime = sig->utime;
-	times->stime = sig->stime;
-	times->sum_exec_runtime = sig->sum_sched_runtime;
-
-	rcu_read_lock();
-	/* make sure we can trust tsk->thread_group list */
-	if (!likely(pid_alive(tsk)))
-		goto out;
-
-	t = tsk;
-	do {
-		times->utime += t->utime;
-		times->stime += t->stime;
-		times->sum_exec_runtime += task_sched_runtime(t);
-	} while_each_thread(tsk, t);
-out:
-	rcu_read_unlock();
 }
 
 static void update_gt_cputime(struct task_cputime *a, struct task_cputime *b)
@@ -494,6 +471,8 @@ static void cleanup_timers(struct list_head *head,
  */
 void posix_cpu_timers_exit(struct task_struct *tsk)
 {
+	add_device_randomness((const void*) &tsk->se.sum_exec_runtime,
+						sizeof(unsigned long long));
 	cleanup_timers(tsk->cpu_timers,
 		       tsk->utime, tsk->stime, tsk->se.sum_exec_runtime);
 
@@ -1422,8 +1401,10 @@ static int do_cpu_nanosleep(const clockid_t which_clock, int flags,
 		while (!signal_pending(current)) {
 			if (timer.it.cpu.expires.sched == 0) {
 				/*
-				 * Our timer fired and was reset.
+				 * Our timer fired and was reset, below
+				 * deletion can not fail.
 				 */
+				posix_cpu_timer_del(&timer);
 				spin_unlock_irq(&timer.it_lock);
 				return 0;
 			}
@@ -1441,8 +1422,25 @@ static int do_cpu_nanosleep(const clockid_t which_clock, int flags,
 		 * We were interrupted by a signal.
 		 */
 		sample_to_timespec(which_clock, timer.it.cpu.expires, rqtp);
-		posix_cpu_timer_set(&timer, 0, &zero_it, it);
+		error = posix_cpu_timer_set(&timer, 0, &zero_it, it);
+		if (!error) {
+			/*
+			 * Timer is now unarmed, deletion can not fail.
+			 */
+			posix_cpu_timer_del(&timer);
+		}
 		spin_unlock_irq(&timer.it_lock);
+
+		while (error == TIMER_RETRY) {
+			/*
+			 * We need to handle case when timer was or is in the
+			 * middle of firing. In other cases we already freed
+			 * resources.
+			 */
+			spin_lock_irq(&timer.it_lock);
+			error = posix_cpu_timer_del(&timer);
+			spin_unlock_irq(&timer.it_lock);
+		}
 
 		if ((it->it_value.tv_sec | it->it_value.tv_nsec) == 0) {
 			/*

@@ -141,9 +141,9 @@ config PPC
 	select GENERIC_CLOCKEVENTS
 	select GENERIC_STRNCPY_FROM_USER
 	select GENERIC_STRNLEN_USER
-	select GENERIC_KERNEL_THREAD
 	select HAVE_MOD_ARCH_SPECIFIC
 	select MODULES_USE_ELF_RELA
+	select CLONE_BACKWARDS
 
 config EARLY_PRINTK
 	bool
@@ -274,6 +274,10 @@ config PPC_ADV_DEBUG_DAC_RANGE
 	bool
 	depends on PPC_ADV_DEBUG_REGS && 44x
 	default y
+
+config PPC_EMULATE_SSTEP
+	bool
+	default y if KPROBES || UPROBES || XMON || HAVE_HW_BREAKPOINT
 
 source "init/Kconfig"
 

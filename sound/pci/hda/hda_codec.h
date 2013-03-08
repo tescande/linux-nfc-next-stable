@@ -671,6 +671,8 @@ struct hda_bus {
 	unsigned int response_reset:1;	/* controller was reset */
 	unsigned int in_reset:1;	/* during reset operation */
 	unsigned int power_keep_link_on:1; /* don't power off HDA link */
+
+	int primary_dig_out_type;	/* primary digital out PCM type */
 };
 
 /*
@@ -757,6 +759,7 @@ struct hda_pcm_stream {
 	u32 rates;	/* supported rates */
 	u64 formats;	/* supported formats (SNDRV_PCM_FMTBIT_) */
 	unsigned int maxbps;	/* supported max. bit per sample */
+	const struct snd_pcm_chmap_elem *chmap; /* chmap to override */
 	struct hda_pcm_ops ops;
 };
 
@@ -885,6 +888,8 @@ struct hda_codec {
 
 	/* jack detection */
 	struct snd_array jacktbl;
+	unsigned long jackpoll_interval; /* In jiffies. Zero means no poll, rely on unsol events */
+	struct delayed_work jackpoll_work;
 
 #ifdef CONFIG_SND_HDA_INPUT_JACK
 	/* jack detection */
@@ -1023,6 +1028,8 @@ unsigned int snd_hda_calc_stream_format(unsigned int rate,
 					unsigned short spdif_ctls);
 int snd_hda_is_supported_format(struct hda_codec *codec, hda_nid_t nid,
 				unsigned int format);
+
+extern const struct snd_pcm_chmap_elem snd_pcm_2_1_chmaps[];
 
 /*
  * Misc

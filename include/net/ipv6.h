@@ -15,6 +15,7 @@
 
 #include <linux/ipv6.h>
 #include <linux/hardirq.h>
+#include <linux/jhash.h>
 #include <net/if_inet6.h>
 #include <net/ndisc.h>
 #include <net/flow.h>
@@ -271,6 +272,15 @@ struct ipv6_txoptions *ipv6_fixup_options(struct ipv6_txoptions *opt_space,
 
 extern bool ipv6_opt_accepted(const struct sock *sk, const struct sk_buff *skb);
 
+static inline bool ipv6_accept_ra(struct inet6_dev *idev)
+{
+	/* If forwarding is enabled, RA are not accepted unless the special
+	 * hybrid mode (accept_ra=2) is enabled.
+	 */
+	return idev->cnf.forwarding ? idev->cnf.accept_ra == 2 :
+	    idev->cnf.accept_ra;
+}
+
 #if IS_ENABLED(CONFIG_IPV6)
 static inline int ip6_frag_nqueues(struct net *net)
 {
@@ -464,6 +474,17 @@ static inline u32 ipv6_addr_hash(const struct in6_addr *a)
 #endif
 }
 
+/* more secured version of ipv6_addr_hash() */
+static inline u32 ipv6_addr_jhash(const struct in6_addr *a)
+{
+	u32 v = (__force u32)a->s6_addr32[0] ^ (__force u32)a->s6_addr32[1];
+
+	return jhash_3words(v,
+			    (__force u32)a->s6_addr32[2],
+			    (__force u32)a->s6_addr32[3],
+			    ipv6_hash_secret);
+}
+
 static inline bool ipv6_addr_loopback(const struct in6_addr *a)
 {
 	return (a->s6_addr32[0] | a->s6_addr32[1] |
@@ -629,6 +650,16 @@ extern int			ipv6_skip_exthdr(const struct sk_buff *, int start,
 					         u8 *nexthdrp, __be16 *frag_offp);
 
 extern bool			ipv6_ext_hdr(u8 nexthdr);
+
+enum {
+	IP6_FH_F_FRAG		= (1 << 0),
+	IP6_FH_F_AUTH		= (1 << 1),
+	IP6_FH_F_SKIP_RH	= (1 << 2),
+};
+
+/* find specified header and get offset to it */
+extern int ipv6_find_hdr(const struct sk_buff *skb, unsigned int *offset,
+			 int target, unsigned short *fragoff, int *fragflg);
 
 extern int ipv6_find_tlv(struct sk_buff *skb, int offset, int type);
 
