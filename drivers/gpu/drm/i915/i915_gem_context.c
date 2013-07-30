@@ -113,7 +113,7 @@ static int get_context_size(struct drm_device *dev)
 	case 7:
 		reg = I915_READ(GEN7_CXT_SIZE);
 		if (IS_HASWELL(dev))
-			ret = HSW_CXT_TOTAL_SIZE(reg) * 64;
+			ret = HSW_CXT_TOTAL_SIZE;
 		else
 			ret = GEN7_CXT_TOTAL_SIZE(reg) * 64;
 		break;
@@ -150,6 +150,13 @@ create_hw_context(struct drm_device *dev,
 		kfree(ctx);
 		DRM_DEBUG_DRIVER("Context object allocated failed\n");
 		return ERR_PTR(-ENOMEM);
+	}
+
+	if (INTEL_INFO(dev)->gen >= 7) {
+		ret = i915_gem_object_set_cache_level(ctx->obj,
+						      I915_CACHE_LLC_MLC);
+		if (ret)
+			goto err_out;
 	}
 
 	/* The ring associated with the context object is handled by the normal

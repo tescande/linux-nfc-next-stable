@@ -3984,12 +3984,12 @@ static int megasas_probe_one(struct pci_dev *pdev,
 	if (reset_devices) {
 		pos = pci_find_capability(pdev, PCI_CAP_ID_MSIX);
 		if (pos) {
-			pci_read_config_word(pdev, msi_control_reg(pos),
+			pci_read_config_word(pdev, pos + PCI_MSIX_FLAGS,
 					     &control);
 			if (control & PCI_MSIX_FLAGS_ENABLE) {
 				dev_info(&pdev->dev, "resetting MSI-X\n");
 				pci_write_config_word(pdev,
-						      msi_control_reg(pos),
+						      pos + PCI_MSIX_FLAGS,
 						      control &
 						      ~PCI_MSIX_FLAGS_ENABLE);
 			}
@@ -4852,10 +4852,12 @@ megasas_mgmt_fw_ioctl(struct megasas_instance *instance,
 				    sense, sense_handle);
 	}
 
-	for (i = 0; i < ioc->sge_count && kbuff_arr[i]; i++) {
-		dma_free_coherent(&instance->pdev->dev,
-				    kern_sge32[i].length,
-				    kbuff_arr[i], kern_sge32[i].phys_addr);
+	for (i = 0; i < ioc->sge_count; i++) {
+		if (kbuff_arr[i])
+			dma_free_coherent(&instance->pdev->dev,
+					  kern_sge32[i].length,
+					  kbuff_arr[i],
+					  kern_sge32[i].phys_addr);
 	}
 
 	megasas_return_cmd(instance, cmd);
@@ -4931,11 +4933,12 @@ static int megasas_mgmt_ioctl_fw(struct file *file, unsigned long arg)
 		printk(KERN_ERR "megaraid_sas: timed out while"
 			"waiting for HBA to recover\n");
 		error = -ENODEV;
-		goto out_kfree_ioc;
+		goto out_up;
 	}
 	spin_unlock_irqrestore(&instance->hba_lock, flags);
 
 	error = megasas_mgmt_fw_ioctl(instance, user_ioc, ioc);
+      out_up:
 	up(&instance->ioctl_sem);
 
       out_kfree_ioc:

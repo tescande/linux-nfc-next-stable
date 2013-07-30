@@ -205,11 +205,11 @@ static void
 drm_gem_remove_prime_handles(struct drm_gem_object *obj, struct drm_file *filp)
 {
 	if (obj->import_attach) {
-		drm_prime_remove_imported_buf_handle(&filp->prime,
+		drm_prime_remove_buf_handle(&filp->prime,
 				obj->import_attach->dmabuf);
 	}
 	if (obj->export_dma_buf) {
-		drm_prime_remove_imported_buf_handle(&filp->prime,
+		drm_prime_remove_buf_handle(&filp->prime,
 				obj->export_dma_buf);
 	}
 }
@@ -453,25 +453,21 @@ drm_gem_flink_ioctl(struct drm_device *dev, void *data,
 	spin_lock(&dev->object_name_lock);
 	if (!obj->name) {
 		ret = idr_alloc(&dev->object_name_idr, obj, 1, 0, GFP_NOWAIT);
-		obj->name = ret;
-		args->name = (uint64_t) obj->name;
-		spin_unlock(&dev->object_name_lock);
-		idr_preload_end();
-
 		if (ret < 0)
 			goto err;
-		ret = 0;
+
+		obj->name = ret;
 
 		/* Allocate a reference for the name table.  */
 		drm_gem_object_reference(obj);
-	} else {
-		args->name = (uint64_t) obj->name;
-		spin_unlock(&dev->object_name_lock);
-		idr_preload_end();
-		ret = 0;
 	}
 
+	args->name = (uint64_t) obj->name;
+	ret = 0;
+
 err:
+	spin_unlock(&dev->object_name_lock);
+	idr_preload_end();
 	drm_gem_object_unreference_unlocked(obj);
 	return ret;
 }

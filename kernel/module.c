@@ -1209,10 +1209,11 @@ static inline int check_modstruct_version(Elf_Shdr *sechdrs,
 
 	/* Since this should be found in kernel (which can't be removed),
 	 * no locking is necessary. */
-	if (!find_symbol(MODULE_SYMBOL_PREFIX "module_layout", NULL,
+	if (!find_symbol(VMLINUX_SYMBOL_STR(module_layout), NULL,
 			 &crc, true, false))
 		BUG();
-	return check_version(sechdrs, versindex, "module_layout", mod, crc,
+	return check_version(sechdrs, versindex,
+			     VMLINUX_SYMBOL_STR(module_layout), mod, crc,
 			     NULL);
 }
 
@@ -1861,11 +1862,11 @@ static void free_module(struct module *mod)
 {
 	trace_module_free(mod);
 
-	/* Delete from various lists */
-	mutex_lock(&module_mutex);
-	stop_machine(__unlink_module, mod, NULL);
-	mutex_unlock(&module_mutex);
 	mod_sysfs_teardown(mod);
+
+	/* We leave it in list to prevent duplicate loads, but make sure
+	 * that noone uses it while it's being deconstructed. */
+	mod->state = MODULE_STATE_UNFORMED;
 
 	/* Remove dynamic debug info */
 	ddebug_remove_module(mod->name);
@@ -1878,6 +1879,11 @@ static void free_module(struct module *mod)
 
 	/* Free any allocated parameters. */
 	destroy_params(mod->kp, mod->num_kp);
+
+	/* Now we can delete it from the lists */
+	mutex_lock(&module_mutex);
+	stop_machine(__unlink_module, mod, NULL);
+	mutex_unlock(&module_mutex);
 
 	/* This may be NULL, but that's OK */
 	unset_module_init_ro_nx(mod);
@@ -2425,10 +2431,10 @@ static void kmemleak_load_module(const struct module *mod,
 	kmemleak_scan_area(mod, sizeof(struct module), GFP_KERNEL);
 
 	for (i = 1; i < info->hdr->e_shnum; i++) {
-		const char *name = info->secstrings + info->sechdrs[i].sh_name;
-		if (!(info->sechdrs[i].sh_flags & SHF_ALLOC))
-			continue;
-		if (!strstarts(name, ".data") && !strstarts(name, ".bss"))
+		/* Scan all writable sections that's not executable */
+		if (!(info->sechdrs[i].sh_flags & SHF_ALLOC) ||
+		    !(info->sechdrs[i].sh_flags & SHF_WRITE) ||
+		    (info->sechdrs[i].sh_flags & SHF_EXECINSTR))
 			continue;
 
 		kmemleak_scan_area((void *)info->sechdrs[i].sh_addr,
@@ -2763,24 +2769,11 @@ static void find_module_sections(struct module *mod, struct load_info *info)
 	mod->trace_events = section_objs(info, "_ftrace_events",
 					 sizeof(*mod->trace_events),
 					 &mod->num_trace_events);
-	/*
-	 * This section contains pointers to allocated objects in the trace
-	 * code and not scanning it leads to false positives.
-	 */
-	kmemleak_scan_area(mod->trace_events, sizeof(*mod->trace_events) *
-			   mod->num_trace_events, GFP_KERNEL);
 #endif
 #ifdef CONFIG_TRACING
 	mod->trace_bprintk_fmt_start = section_objs(info, "__trace_printk_fmt",
 					 sizeof(*mod->trace_bprintk_fmt_start),
 					 &mod->num_trace_bprintk_fmt);
-	/*
-	 * This section contains pointers to allocated objects in the trace
-	 * code and not scanning it leads to false positives.
-	 */
-	kmemleak_scan_area(mod->trace_bprintk_fmt_start,
-			   sizeof(*mod->trace_bprintk_fmt_start) *
-			   mod->num_trace_bprintk_fmt, GFP_KERNEL);
 #endif
 #ifdef CONFIG_FTRACE_MCOUNT_RECORD
 	/* sechdrs[0].sh_size is always zero */
@@ -2934,7 +2927,6 @@ static struct module *layout_and_allocate(struct load_info *info, int flags)
 {
 	/* Module within temporary copy. */
 	struct module *mod;
-	Elf_Shdr *pcpusec;
 	int err;
 
 	mod = setup_load_info(info, flags);
@@ -2949,17 +2941,10 @@ static struct module *layout_and_allocate(struct load_info *info, int flags)
 	err = module_frob_arch_sections(info->hdr, info->sechdrs,
 					info->secstrings, mod);
 	if (err < 0)
-		goto out;
+		return ERR_PTR(err);
 
-	pcpusec = &info->sechdrs[info->index.pcpu];
-	if (pcpusec->sh_size) {
-		/* We have a special allocation for this section. */
-		err = percpu_modalloc(mod,
-				      pcpusec->sh_size, pcpusec->sh_addralign);
-		if (err)
-			goto out;
-		pcpusec->sh_flags &= ~(unsigned long)SHF_ALLOC;
-	}
+	/* We will do a special allocation for per-cpu sections later. */
+	info->sechdrs[info->index.pcpu].sh_flags &= ~(unsigned long)SHF_ALLOC;
 
 	/* Determine total sizes, and put offsets in sh_entsize.  For now
 	   this is done generically; there doesn't appear to be any
@@ -2970,17 +2955,22 @@ static struct module *layout_and_allocate(struct load_info *info, int flags)
 	/* Allocate and move to the final place */
 	err = move_module(mod, info);
 	if (err)
-		goto free_percpu;
+		return ERR_PTR(err);
 
 	/* Module has been copied to its final place now: return it. */
 	mod = (void *)info->sechdrs[info->index.mod].sh_addr;
 	kmemleak_load_module(mod, info);
 	return mod;
+}
 
-free_percpu:
-	percpu_modfree(mod);
-out:
-	return ERR_PTR(err);
+static int alloc_module_percpu(struct module *mod, struct load_info *info)
+{
+	Elf_Shdr *pcpusec = &info->sechdrs[info->index.pcpu];
+	if (!pcpusec->sh_size)
+		return 0;
+
+	/* We have a special allocation for this section. */
+	return percpu_modalloc(mod, pcpusec->sh_size, pcpusec->sh_addralign);
 }
 
 /* mod is no longer valid after this! */
@@ -3243,6 +3233,11 @@ static int load_module(struct load_info *info, const char __user *uargs,
 		add_taint_module(mod, TAINT_FORCED_MODULE, LOCKDEP_STILL_OK);
 	}
 #endif
+
+	/* To avoid stressing percpu allocator, do this once we're unique. */
+	err = alloc_module_percpu(mod, info);
+	if (err)
+		goto unlink_mod;
 
 	/* Now module is in final location, initialize linked lists, etc. */
 	err = module_unload_init(mod);

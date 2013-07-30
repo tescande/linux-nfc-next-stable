@@ -450,7 +450,7 @@ static void uevent_notify(struct charger_manager *cm, const char *event)
 	strncpy(env_str, event, UEVENT_BUF_SIZE);
 	kobject_uevent(&cm->dev->kobj, KOBJ_CHANGE);
 
-	dev_info(cm->dev, event);
+	dev_info(cm->dev, "%s", event);
 }
 
 /**
@@ -1485,13 +1485,12 @@ static int charger_manager_probe(struct platform_device *pdev)
 
 	/* Basic Values. Unspecified are Null or 0 */
 	cm->dev = &pdev->dev;
-	cm->desc = kzalloc(sizeof(struct charger_desc), GFP_KERNEL);
+	cm->desc = kmemdup(desc, sizeof(struct charger_desc), GFP_KERNEL);
 	if (!cm->desc) {
 		dev_err(&pdev->dev, "Cannot allocate memory.\n");
 		ret = -ENOMEM;
 		goto err_alloc_desc;
 	}
-	memcpy(cm->desc, desc, sizeof(struct charger_desc));
 	cm->last_temp_mC = INT_MIN; /* denotes "unmeasured, yet" */
 
 	/*
