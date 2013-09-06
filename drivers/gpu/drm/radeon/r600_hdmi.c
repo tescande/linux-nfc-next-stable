@@ -242,9 +242,15 @@ void r600_audio_set_dto(struct drm_encoder *encoder, u32 clock)
 		/* according to the reg specs, this should DCE3.2 only, but in
 		 * practice it seems to cover DCE3.0 as well.
 		 */
-		WREG32(DCCG_AUDIO_DTO0_PHASE, base_rate * 100);
-		WREG32(DCCG_AUDIO_DTO0_MODULE, clock * 100);
-		WREG32(DCCG_AUDIO_DTO_SELECT, 0); /* select DTO0 */
+		if (dig->dig_encoder == 0) {
+			WREG32(DCCG_AUDIO_DTO0_PHASE, base_rate * 100);
+			WREG32(DCCG_AUDIO_DTO0_MODULE, clock * 100);
+			WREG32(DCCG_AUDIO_DTO_SELECT, 0); /* select DTO0 */
+		} else {
+			WREG32(DCCG_AUDIO_DTO1_PHASE, base_rate * 100);
+			WREG32(DCCG_AUDIO_DTO1_MODULE, clock * 100);
+			WREG32(DCCG_AUDIO_DTO_SELECT, 1); /* select DTO1 */
+		}
 	} else {
 		/* according to the reg specs, this should be DCE2.0 and DCE3.0 */
 		WREG32(AUDIO_DTO, AUDIO_DTO_PHASE(base_rate / 10) |
@@ -265,6 +271,9 @@ void r600_hdmi_setmode(struct drm_encoder *encoder, struct drm_display_mode *mod
 	struct hdmi_avi_infoframe frame;
 	uint32_t offset;
 	ssize_t err;
+
+	if (!dig || !dig->afmt)
+		return;
 
 	/* Silent, r600_hdmi_enable will raise WARN for us */
 	if (!dig->afmt->enabled)
@@ -447,6 +456,9 @@ void r600_hdmi_enable(struct drm_encoder *encoder, bool enable)
 	struct radeon_encoder *radeon_encoder = to_radeon_encoder(encoder);
 	struct radeon_encoder_atom_dig *dig = radeon_encoder->enc_priv;
 	u32 hdmi = HDMI0_ERROR_ACK;
+
+	if (!dig || !dig->afmt)
+		return;
 
 	/* Silent, r600_hdmi_enable will raise WARN for us */
 	if (enable && dig->afmt->enabled)
