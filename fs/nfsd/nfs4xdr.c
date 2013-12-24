@@ -141,8 +141,8 @@ xdr_error:					\
 
 static void next_decode_page(struct nfsd4_compoundargs *argp)
 {
-	argp->pagelist++;
 	argp->p = page_address(argp->pagelist[0]);
+	argp->pagelist++;
 	if (argp->pagelen < PAGE_SIZE) {
 		argp->end = argp->p + (argp->pagelen>>2);
 		argp->pagelen = 0;
@@ -411,6 +411,7 @@ nfsd4_decode_fattr(struct nfsd4_compoundargs *argp, u32 *bmval,
 		label->data = kzalloc(dummy32 + 1, GFP_KERNEL);
 		if (!label->data)
 			return nfserr_jukebox;
+		label->len = dummy32;
 		defer_free(argp, kfree, label->data);
 		memcpy(label->data, buf, dummy32);
 	}
@@ -1208,6 +1209,7 @@ nfsd4_decode_write(struct nfsd4_compoundargs *argp, struct nfsd4_write *write)
 		len -= pages * PAGE_SIZE;
 
 		argp->p = (__be32 *)page_address(argp->pagelist[0]);
+		argp->pagelist++;
 		argp->end = argp->p + XDR_QUADLEN(PAGE_SIZE);
 	}
 	argp->p += XDR_QUADLEN(len);
@@ -1816,10 +1818,7 @@ static __be32 nfsd4_encode_fs_location4(struct nfsd4_fs_location *location,
 static __be32 nfsd4_encode_path(const struct path *root,
 		const struct path *path, __be32 **pp, int *buflen)
 {
-	struct path cur = {
-		.mnt = path->mnt,
-		.dentry = path->dentry,
-	};
+	struct path cur = *path;
 	__be32 *p = *pp;
 	struct dentry **components = NULL;
 	unsigned int ncomponents = 0;
@@ -1859,14 +1858,19 @@ static __be32 nfsd4_encode_path(const struct path *root,
 
 	while (ncomponents) {
 		struct dentry *dentry = components[ncomponents - 1];
-		unsigned int len = dentry->d_name.len;
+		unsigned int len;
 
+		spin_lock(&dentry->d_lock);
+		len = dentry->d_name.len;
 		*buflen -= 4 + (XDR_QUADLEN(len) << 2);
-		if (*buflen < 0)
+		if (*buflen < 0) {
+			spin_unlock(&dentry->d_lock);
 			goto out_free;
+		}
 		WRITE32(len);
 		WRITEMEM(dentry->d_name.name, len);
 		dprintk("/%s", dentry->d_name.name);
+		spin_unlock(&dentry->d_lock);
 		dput(dentry);
 		ncomponents--;
 	}

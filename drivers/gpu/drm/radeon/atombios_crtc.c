@@ -1753,7 +1753,7 @@ static int radeon_atom_pick_pll(struct drm_crtc *crtc)
 				if (pll != ATOM_PPLL_INVALID)
 					return pll;
 			}
-		} else {
+		} else if (!ASIC_IS_DCE41(rdev)) { /* Don't share PLLs on DCE4.1 chips */
 			/* use the same PPLL for all monitors with the same clock */
 			pll = radeon_get_shared_nondp_ppll(crtc);
 			if (pll != ATOM_PPLL_INVALID)
@@ -1910,6 +1910,12 @@ static void atombios_crtc_disable(struct drm_crtc *crtc)
 	int i;
 
 	atombios_crtc_dpms(crtc, DRM_MODE_DPMS_OFF);
+	/* disable the GRPH */
+	if (ASIC_IS_DCE4(rdev))
+		WREG32(EVERGREEN_GRPH_ENABLE + radeon_crtc->crtc_offset, 0);
+	else if (ASIC_IS_AVIVO(rdev))
+		WREG32(AVIVO_D1GRPH_ENABLE + radeon_crtc->crtc_offset, 0);
+
 	if (ASIC_IS_DCE6(rdev))
 		atombios_powergate_crtc(crtc, ATOM_ENABLE);
 

@@ -26,7 +26,6 @@
 #include <linux/sched.h>
 #include <linux/fcntl.h>
 #include <linux/delay.h>
-#include <linux/ioport.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/kmod.h>
@@ -262,7 +261,7 @@ static int resize_async_buffer(struct comedi_device *dev,
 
 /* sysfs attribute files */
 
-static ssize_t show_max_read_buffer_kb(struct device *csdev,
+static ssize_t max_read_buffer_kb_show(struct device *csdev,
 				       struct device_attribute *attr, char *buf)
 {
 	unsigned int minor = MINOR(csdev->devt);
@@ -283,7 +282,7 @@ static ssize_t show_max_read_buffer_kb(struct device *csdev,
 	return snprintf(buf, PAGE_SIZE, "%i\n", size);
 }
 
-static ssize_t store_max_read_buffer_kb(struct device *csdev,
+static ssize_t max_read_buffer_kb_store(struct device *csdev,
 					struct device_attribute *attr,
 					const char *buf, size_t count)
 {
@@ -314,8 +313,9 @@ static ssize_t store_max_read_buffer_kb(struct device *csdev,
 
 	return err ? err : count;
 }
+static DEVICE_ATTR_RW(max_read_buffer_kb);
 
-static ssize_t show_read_buffer_kb(struct device *csdev,
+static ssize_t read_buffer_kb_show(struct device *csdev,
 				   struct device_attribute *attr, char *buf)
 {
 	unsigned int minor = MINOR(csdev->devt);
@@ -336,7 +336,7 @@ static ssize_t show_read_buffer_kb(struct device *csdev,
 	return snprintf(buf, PAGE_SIZE, "%i\n", size);
 }
 
-static ssize_t store_read_buffer_kb(struct device *csdev,
+static ssize_t read_buffer_kb_store(struct device *csdev,
 				    struct device_attribute *attr,
 				    const char *buf, size_t count)
 {
@@ -367,8 +367,9 @@ static ssize_t store_read_buffer_kb(struct device *csdev,
 
 	return err ? err : count;
 }
+static DEVICE_ATTR_RW(read_buffer_kb);
 
-static ssize_t show_max_write_buffer_kb(struct device *csdev,
+static ssize_t max_write_buffer_kb_show(struct device *csdev,
 					struct device_attribute *attr,
 					char *buf)
 {
@@ -390,7 +391,7 @@ static ssize_t show_max_write_buffer_kb(struct device *csdev,
 	return snprintf(buf, PAGE_SIZE, "%i\n", size);
 }
 
-static ssize_t store_max_write_buffer_kb(struct device *csdev,
+static ssize_t max_write_buffer_kb_store(struct device *csdev,
 					 struct device_attribute *attr,
 					 const char *buf, size_t count)
 {
@@ -421,8 +422,9 @@ static ssize_t store_max_write_buffer_kb(struct device *csdev,
 
 	return err ? err : count;
 }
+static DEVICE_ATTR_RW(max_write_buffer_kb);
 
-static ssize_t show_write_buffer_kb(struct device *csdev,
+static ssize_t write_buffer_kb_show(struct device *csdev,
 				    struct device_attribute *attr, char *buf)
 {
 	unsigned int minor = MINOR(csdev->devt);
@@ -443,7 +445,7 @@ static ssize_t show_write_buffer_kb(struct device *csdev,
 	return snprintf(buf, PAGE_SIZE, "%i\n", size);
 }
 
-static ssize_t store_write_buffer_kb(struct device *csdev,
+static ssize_t write_buffer_kb_store(struct device *csdev,
 				     struct device_attribute *attr,
 				     const char *buf, size_t count)
 {
@@ -474,18 +476,16 @@ static ssize_t store_write_buffer_kb(struct device *csdev,
 
 	return err ? err : count;
 }
+static DEVICE_ATTR_RW(write_buffer_kb);
 
-static struct device_attribute comedi_dev_attrs[] = {
-	__ATTR(max_read_buffer_kb, S_IRUGO | S_IWUSR,
-		show_max_read_buffer_kb, store_max_read_buffer_kb),
-	__ATTR(read_buffer_kb, S_IRUGO | S_IWUSR | S_IWGRP,
-		show_read_buffer_kb, store_read_buffer_kb),
-	__ATTR(max_write_buffer_kb, S_IRUGO | S_IWUSR,
-		show_max_write_buffer_kb, store_max_write_buffer_kb),
-	__ATTR(write_buffer_kb, S_IRUGO | S_IWUSR | S_IWGRP,
-		show_write_buffer_kb, store_write_buffer_kb),
-	__ATTR_NULL
+static struct attribute *comedi_dev_attrs[] = {
+	&dev_attr_max_read_buffer_kb.attr,
+	&dev_attr_read_buffer_kb.attr,
+	&dev_attr_max_write_buffer_kb.attr,
+	&dev_attr_write_buffer_kb.attr,
+	NULL,
 };
+ATTRIBUTE_GROUPS(comedi_dev);
 
 static void comedi_set_subdevice_runflags(struct comedi_subdevice *s,
 					  unsigned mask, unsigned bits)
@@ -543,7 +543,7 @@ void *comedi_alloc_spriv(struct comedi_subdevice *s, size_t size)
 {
 	s->private = kzalloc(size, GFP_KERNEL);
 	if (s->private)
-		comedi_set_subdevice_runflags(s, ~0, SRF_FREE_SPRIV);
+		s->runflags |= SRF_FREE_SPRIV;
 	return s->private;
 }
 EXPORT_SYMBOL_GPL(comedi_alloc_spriv);
@@ -1485,7 +1485,8 @@ static int do_cmd_ioctl(struct comedi_device *dev,
 	if (async->cmd.flags & TRIG_WAKE_EOS)
 		async->cb_mask |= COMEDI_CB_EOS;
 
-	comedi_set_subdevice_runflags(s, ~0, SRF_USER | SRF_RUNNING);
+	comedi_set_subdevice_runflags(s, SRF_USER | SRF_ERROR | SRF_RUNNING,
+				      SRF_USER | SRF_RUNNING);
 
 	/* set s->busy _after_ setting SRF_RUNNING flag to avoid race with
 	 * comedi_read() or comedi_write() */
@@ -2564,7 +2565,7 @@ static int __init comedi_init(void)
 		return PTR_ERR(comedi_class);
 	}
 
-	comedi_class->dev_attrs = comedi_dev_attrs;
+	comedi_class->dev_groups = comedi_dev_groups;
 
 	/* XXX requires /proc interface */
 	comedi_proc_init();

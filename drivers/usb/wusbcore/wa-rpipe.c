@@ -333,7 +333,10 @@ static int rpipe_aim(struct wa_rpipe *rpipe, struct wahc *wa,
 	/* FIXME: compute so seg_size > ep->maxpktsize */
 	rpipe->descr.wBlocks = cpu_to_le16(16);		/* given */
 	/* ep0 maxpktsize is 0x200 (WUSB1.0[4.8.1]) */
-	rpipe->descr.wMaxPacketSize = cpu_to_le16(ep->desc.wMaxPacketSize);
+	if (usb_endpoint_xfer_isoc(&ep->desc))
+		rpipe->descr.wMaxPacketSize = epcd->wOverTheAirPacketSize;
+	else
+		rpipe->descr.wMaxPacketSize = ep->desc.wMaxPacketSize;
 
 	rpipe->descr.hwa_bMaxBurst = max(min_t(unsigned int,
 				epcd->bMaxBurst, 16U), 1U);
@@ -527,3 +530,24 @@ void rpipe_ep_disable(struct wahc *wa, struct usb_host_endpoint *ep)
 	mutex_unlock(&wa->rpipe_mutex);
 }
 EXPORT_SYMBOL_GPL(rpipe_ep_disable);
+
+/* Clear the stalled status of an RPIPE. */
+void rpipe_clear_feature_stalled(struct wahc *wa, struct usb_host_endpoint *ep)
+{
+	struct wa_rpipe *rpipe;
+
+	mutex_lock(&wa->rpipe_mutex);
+	rpipe = ep->hcpriv;
+	if (rpipe != NULL) {
+		u16 index = le16_to_cpu(rpipe->descr.wRPipeIndex);
+
+		usb_control_msg(
+			wa->usb_dev, usb_rcvctrlpipe(wa->usb_dev, 0),
+			USB_REQ_CLEAR_FEATURE,
+			USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_RPIPE,
+			RPIPE_STALL, index, NULL, 0, 1000);
+	}
+	mutex_unlock(&wa->rpipe_mutex);
+}
+EXPORT_SYMBOL_GPL(rpipe_clear_feature_stalled);
+

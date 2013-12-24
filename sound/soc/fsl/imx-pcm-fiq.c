@@ -22,6 +22,7 @@
 #include <linux/slab.h>
 
 #include <sound/core.h>
+#include <sound/dmaengine_pcm.h>
 #include <sound/initval.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
@@ -32,6 +33,7 @@
 #include <linux/platform_data/asoc-imx-ssi.h>
 
 #include "imx-ssi.h"
+#include "imx-pcm.h"
 
 struct imx_pcm_runtime_data {
 	unsigned int period;
@@ -42,7 +44,8 @@ struct imx_pcm_runtime_data {
 	struct hrtimer hrt;
 	int poll_time_ns;
 	struct snd_pcm_substream *substream;
-	atomic_t running;
+	atomic_t playing;
+	atomic_t capturing;
 };
 
 static enum hrtimer_restart snd_hrtimer_callback(struct hrtimer *hrt)
@@ -54,7 +57,7 @@ static enum hrtimer_restart snd_hrtimer_callback(struct hrtimer *hrt)
 	struct pt_regs regs;
 	unsigned long delta;
 
-	if (!atomic_read(&iprtd->running))
+	if (!atomic_read(&iprtd->playing) && !atomic_read(&iprtd->capturing))
 		return HRTIMER_NORESTART;
 
 	get_fiq_regs(&regs);
@@ -122,7 +125,6 @@ static int snd_imx_pcm_prepare(struct snd_pcm_substream *substream)
 	return 0;
 }
 
-static int fiq_enable;
 static int imx_pcm_fiq;
 
 static int snd_imx_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
@@ -134,23 +136,27 @@ static int snd_imx_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
-		atomic_set(&iprtd->running, 1);
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+			atomic_set(&iprtd->playing, 1);
+		else
+			atomic_set(&iprtd->capturing, 1);
 		hrtimer_start(&iprtd->hrt, ns_to_ktime(iprtd->poll_time_ns),
 		      HRTIMER_MODE_REL);
-		if (++fiq_enable == 1)
-			enable_fiq(imx_pcm_fiq);
-
+		enable_fiq(imx_pcm_fiq);
 		break;
 
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
-		atomic_set(&iprtd->running, 0);
-
-		if (--fiq_enable == 0)
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+			atomic_set(&iprtd->playing, 0);
+		else
+			atomic_set(&iprtd->capturing, 0);
+		if (!atomic_read(&iprtd->playing) &&
+				!atomic_read(&iprtd->capturing))
 			disable_fiq(imx_pcm_fiq);
-
 		break;
+
 	default:
 		return -EINVAL;
 	}
@@ -198,7 +204,8 @@ static int snd_imx_open(struct snd_pcm_substream *substream)
 
 	iprtd->substream = substream;
 
-	atomic_set(&iprtd->running, 0);
+	atomic_set(&iprtd->playing, 0);
+	atomic_set(&iprtd->capturing, 0);
 	hrtimer_init(&iprtd->hrt, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	iprtd->hrt.function = snd_hrtimer_callback;
 
@@ -366,9 +373,9 @@ static struct snd_soc_platform_driver imx_soc_platform_fiq = {
 	.pcm_free	= imx_pcm_fiq_free,
 };
 
-int imx_pcm_fiq_init(struct platform_device *pdev)
+int imx_pcm_fiq_init(struct platform_device *pdev,
+		struct imx_pcm_fiq_params *params)
 {
-	struct imx_ssi *ssi = platform_get_drvdata(pdev);
 	int ret;
 
 	ret = claim_fiq(&fh);
@@ -377,15 +384,15 @@ int imx_pcm_fiq_init(struct platform_device *pdev)
 		return ret;
 	}
 
-	mxc_set_irq_fiq(ssi->irq, 1);
-	ssi_irq = ssi->irq;
+	mxc_set_irq_fiq(params->irq, 1);
+	ssi_irq = params->irq;
 
-	imx_pcm_fiq = ssi->irq;
+	imx_pcm_fiq = params->irq;
 
-	imx_ssi_fiq_base = (unsigned long)ssi->base;
+	imx_ssi_fiq_base = (unsigned long)params->base;
 
-	ssi->dma_params_tx.maxburst = 4;
-	ssi->dma_params_rx.maxburst = 6;
+	params->dma_params_tx->maxburst = 4;
+	params->dma_params_rx->maxburst = 6;
 
 	ret = snd_soc_register_platform(&pdev->dev, &imx_soc_platform_fiq);
 	if (ret)
@@ -406,3 +413,5 @@ void imx_pcm_fiq_exit(struct platform_device *pdev)
 	snd_soc_unregister_platform(&pdev->dev);
 }
 EXPORT_SYMBOL_GPL(imx_pcm_fiq_exit);
+
+MODULE_LICENSE("GPL");

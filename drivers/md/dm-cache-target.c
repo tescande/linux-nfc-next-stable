@@ -67,9 +67,11 @@ static void free_bitset(unsigned long *bits)
 #define MIGRATION_COUNT_WINDOW 10
 
 /*
- * The block size of the device holding cache data must be >= 32KB
+ * The block size of the device holding cache data must be
+ * between 32KB and 1GB.
  */
 #define DATA_DEV_BLOCK_SIZE_MIN_SECTORS (32 * 1024 >> SECTOR_SHIFT)
+#define DATA_DEV_BLOCK_SIZE_MAX_SECTORS (1024 * 1024 * 1024 >> SECTOR_SHIFT)
 
 /*
  * FIXME: the cache is read/write for the time being.
@@ -101,6 +103,8 @@ struct cache {
 	struct dm_target *ti;
 	struct dm_target_callbacks callbacks;
 
+	struct dm_cache_metadata *cmd;
+
 	/*
 	 * Metadata is written to this device.
 	 */
@@ -115,11 +119,6 @@ struct cache {
 	 * The faster of the two data devices.  Typically an SSD.
 	 */
 	struct dm_dev *cache_dev;
-
-	/*
-	 * Cache features such as write-through.
-	 */
-	struct cache_features features;
 
 	/*
 	 * Size of the origin device in _complete_ blocks and native sectors.
@@ -138,8 +137,6 @@ struct cache {
 	uint32_t sectors_per_block;
 	int sectors_per_block_shift;
 
-	struct dm_cache_metadata *cmd;
-
 	spinlock_t lock;
 	struct bio_list deferred_bios;
 	struct bio_list deferred_flush_bios;
@@ -148,8 +145,11 @@ struct cache {
 	struct list_head completed_migrations;
 	struct list_head need_commit_migrations;
 	sector_t migration_threshold;
-	atomic_t nr_migrations;
 	wait_queue_head_t migration_wait;
+	atomic_t nr_migrations;
+
+	wait_queue_head_t quiescing_wait;
+	atomic_t quiescing_ack;
 
 	/*
 	 * cache_size entries, dirty if set
@@ -160,9 +160,16 @@ struct cache {
 	/*
 	 * origin_blocks entries, discarded if set.
 	 */
-	uint32_t discard_block_size; /* a power of 2 times sectors per block */
 	dm_dblock_t discard_nr_blocks;
 	unsigned long *discard_bitset;
+	uint32_t discard_block_size; /* a power of 2 times sectors per block */
+
+	/*
+	 * Rather than reconstructing the table line for the status we just
+	 * save it and regurgitate.
+	 */
+	unsigned nr_ctr_args;
+	const char **ctr_args;
 
 	struct dm_kcopyd_client *copier;
 	struct workqueue_struct *wq;
@@ -187,14 +194,12 @@ struct cache {
 	bool loaded_mappings:1;
 	bool loaded_discards:1;
 
-	struct cache_stats stats;
-
 	/*
-	 * Rather than reconstructing the table line for the status we just
-	 * save it and regurgitate.
+	 * Cache features such as write-through.
 	 */
-	unsigned nr_ctr_args;
-	const char **ctr_args;
+	struct cache_features features;
+
+	struct cache_stats stats;
 };
 
 struct per_bio_data {
@@ -746,8 +751,9 @@ static void cell_defer(struct cache *cache, struct dm_bio_prison_cell *cell,
 
 static void cleanup_migration(struct dm_cache_migration *mg)
 {
-	dec_nr_migrations(mg->cache);
+	struct cache *cache = mg->cache;
 	free_migration(mg);
+	dec_nr_migrations(cache);
 }
 
 static void migration_failure(struct dm_cache_migration *mg)
@@ -1344,24 +1350,6 @@ static void writeback_some_dirty_blocks(struct cache *cache)
 /*----------------------------------------------------------------
  * Main worker loop
  *--------------------------------------------------------------*/
-static void start_quiescing(struct cache *cache)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	cache->quiescing = 1;
-	spin_unlock_irqrestore(&cache->lock, flags);
-}
-
-static void stop_quiescing(struct cache *cache)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&cache->lock, flags);
-	cache->quiescing = 0;
-	spin_unlock_irqrestore(&cache->lock, flags);
-}
-
 static bool is_quiescing(struct cache *cache)
 {
 	int r;
@@ -1372,6 +1360,41 @@ static bool is_quiescing(struct cache *cache)
 	spin_unlock_irqrestore(&cache->lock, flags);
 
 	return r;
+}
+
+static void ack_quiescing(struct cache *cache)
+{
+	if (is_quiescing(cache)) {
+		atomic_inc(&cache->quiescing_ack);
+		wake_up(&cache->quiescing_wait);
+	}
+}
+
+static void wait_for_quiescing_ack(struct cache *cache)
+{
+	wait_event(cache->quiescing_wait, atomic_read(&cache->quiescing_ack));
+}
+
+static void start_quiescing(struct cache *cache)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	cache->quiescing = true;
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	wait_for_quiescing_ack(cache);
+}
+
+static void stop_quiescing(struct cache *cache)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock, flags);
+	cache->quiescing = false;
+	spin_unlock_irqrestore(&cache->lock, flags);
+
+	atomic_set(&cache->quiescing_ack, 0);
 }
 
 static void wait_for_migrations(struct cache *cache)
@@ -1418,15 +1441,14 @@ static void do_worker(struct work_struct *ws)
 	struct cache *cache = container_of(ws, struct cache, worker);
 
 	do {
-		if (!is_quiescing(cache))
+		if (!is_quiescing(cache)) {
+			writeback_some_dirty_blocks(cache);
+			process_deferred_writethrough_bios(cache);
 			process_deferred_bios(cache);
+		}
 
 		process_migrations(cache, &cache->quiesced_migrations, issue_copy);
 		process_migrations(cache, &cache->completed_migrations, complete_migration);
-
-		writeback_some_dirty_blocks(cache);
-
-		process_deferred_writethrough_bios(cache);
 
 		if (commit_if_needed(cache)) {
 			process_deferred_flush_bios(cache, false);
@@ -1440,6 +1462,9 @@ static void do_worker(struct work_struct *ws)
 			process_migrations(cache, &cache->need_commit_migrations,
 					   migration_success_post_commit);
 		}
+
+		ack_quiescing(cache);
+
 	} while (more_work(cache));
 }
 
@@ -1687,24 +1712,25 @@ static int parse_origin_dev(struct cache_args *ca, struct dm_arg_set *as,
 static int parse_block_size(struct cache_args *ca, struct dm_arg_set *as,
 			    char **error)
 {
-	unsigned long tmp;
+	unsigned long block_size;
 
 	if (!at_least_one_arg(as, error))
 		return -EINVAL;
 
-	if (kstrtoul(dm_shift_arg(as), 10, &tmp) || !tmp ||
-	    tmp < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
-	    tmp & (DATA_DEV_BLOCK_SIZE_MIN_SECTORS - 1)) {
+	if (kstrtoul(dm_shift_arg(as), 10, &block_size) || !block_size ||
+	    block_size < DATA_DEV_BLOCK_SIZE_MIN_SECTORS ||
+	    block_size > DATA_DEV_BLOCK_SIZE_MAX_SECTORS ||
+	    block_size & (DATA_DEV_BLOCK_SIZE_MIN_SECTORS - 1)) {
 		*error = "Invalid data block size";
 		return -EINVAL;
 	}
 
-	if (tmp > ca->cache_sectors) {
+	if (block_size > ca->cache_sectors) {
 		*error = "Data block size is larger than the cache device";
 		return -EINVAL;
 	}
 
-	ca->block_size = tmp;
+	ca->block_size = block_size;
 
 	return 0;
 }
@@ -2001,6 +2027,9 @@ static int cache_create(struct cache_args *ca, struct cache **result)
 	INIT_LIST_HEAD(&cache->need_commit_migrations);
 	atomic_set(&cache->nr_migrations, 0);
 	init_waitqueue_head(&cache->migration_wait);
+
+	init_waitqueue_head(&cache->quiescing_wait);
+	atomic_set(&cache->quiescing_ack, 0);
 
 	r = -ENOMEM;
 	cache->nr_dirty = 0;
@@ -2609,9 +2638,17 @@ static void set_discard_limits(struct cache *cache, struct queue_limits *limits)
 static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
 	struct cache *cache = ti->private;
+	uint64_t io_opt_sectors = limits->io_opt >> SECTOR_SHIFT;
 
-	blk_limits_io_min(limits, 0);
-	blk_limits_io_opt(limits, cache->sectors_per_block << SECTOR_SHIFT);
+	/*
+	 * If the system-determined stacked limits are compatible with the
+	 * cache's blocksize (io_opt is a factor) do not override them.
+	 */
+	if (io_opt_sectors < cache->sectors_per_block ||
+	    do_div(io_opt_sectors, cache->sectors_per_block)) {
+		blk_limits_io_min(limits, 0);
+		blk_limits_io_opt(limits, cache->sectors_per_block << SECTOR_SHIFT);
+	}
 	set_discard_limits(cache, limits);
 }
 
