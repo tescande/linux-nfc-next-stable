@@ -37,6 +37,7 @@
 
 #include <linux/list.h>
 #include <linux/mod_devicetable.h>
+#include <linux/dynamic_debug.h>
 
 #include <acpi/acpi.h>
 #include <acpi/acpi_bus.h>
@@ -107,6 +108,10 @@ static inline void acpi_initrd_override(void *data, size_t size)
 {
 }
 #endif
+
+#define BAD_MADT_ENTRY(entry, end) (					    \
+		(!entry) || (unsigned long)entry + sizeof(*entry) > end ||  \
+		((struct acpi_subtable_header *)entry)->length < sizeof(*entry))
 
 char * __acpi_map_table (unsigned long phys_addr, unsigned long size);
 void __acpi_unmap_table(char *map, unsigned long size);
@@ -259,14 +264,9 @@ extern void acpi_dmi_osi_linux(int enable, const struct dmi_system_id *d);
 extern void acpi_osi_setup(char *str);
 
 #ifdef CONFIG_ACPI_NUMA
-int acpi_get_pxm(acpi_handle handle);
-int acpi_get_node(acpi_handle *handle);
+int acpi_get_node(acpi_handle handle);
 #else
-static inline int acpi_get_pxm(acpi_handle handle)
-{
-	return 0;
-}
-static inline int acpi_get_node(acpi_handle *handle)
+static inline int acpi_get_node(acpi_handle handle)
 {
 	return 0;
 }
@@ -590,6 +590,14 @@ static inline __printf(3, 4) void
 acpi_handle_printk(const char *level, void *handle, const char *fmt, ...) {}
 #endif	/* !CONFIG_ACPI */
 
+#if defined(CONFIG_ACPI) && defined(CONFIG_DYNAMIC_DEBUG)
+__printf(3, 4)
+void __acpi_handle_debug(struct _ddebug *descriptor, acpi_handle handle, const char *fmt, ...);
+#else
+#define __acpi_handle_debug(descriptor, handle, fmt, ...)		\
+	acpi_handle_printk(KERN_DEBUG, handle, fmt, ##__VA_ARGS__);
+#endif
+
 /*
  * acpi_handle_<level>: Print message with ACPI prefix and object path
  *
@@ -611,10 +619,18 @@ acpi_handle_printk(const char *level, void *handle, const char *fmt, ...) {}
 #define acpi_handle_info(handle, fmt, ...)				\
 	acpi_handle_printk(KERN_INFO, handle, fmt, ##__VA_ARGS__)
 
-/* REVISIT: Support CONFIG_DYNAMIC_DEBUG when necessary */
-#if defined(DEBUG) || defined(CONFIG_DYNAMIC_DEBUG)
+#if defined(DEBUG)
 #define acpi_handle_debug(handle, fmt, ...)				\
 	acpi_handle_printk(KERN_DEBUG, handle, fmt, ##__VA_ARGS__)
+#else
+#if defined(CONFIG_DYNAMIC_DEBUG)
+#define acpi_handle_debug(handle, fmt, ...)				\
+do {									\
+	DEFINE_DYNAMIC_DEBUG_METADATA(descriptor, fmt);			\
+	if (unlikely(descriptor.flags & _DPRINTK_FLAGS_PRINT))		\
+		__acpi_handle_debug(&descriptor, handle, pr_fmt(fmt),	\
+				##__VA_ARGS__);				\
+} while (0)
 #else
 #define acpi_handle_debug(handle, fmt, ...)				\
 ({									\
@@ -622,6 +638,7 @@ acpi_handle_printk(const char *level, void *handle, const char *fmt, ...) {}
 		acpi_handle_printk(KERN_DEBUG, handle, fmt, ##__VA_ARGS__); \
 	0;								\
 })
+#endif
 #endif
 
 #endif	/*_LINUX_ACPI_H*/

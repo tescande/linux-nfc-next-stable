@@ -22,7 +22,7 @@
  * Authors: Ben Skeggs
  */
 
-#include <engine/disp.h>
+#include "priv.h"
 
 #include <core/event.h>
 #include <core/class.h>
@@ -50,6 +50,14 @@ nv04_disp_scanoutpos(struct nouveau_object *object, u32 mthd,
 	args->hblanks = nv_rd32(priv, 0x680820 + (head * 0x2000)) & 0xffff;
 	args->htotal  = nv_rd32(priv, 0x680824 + (head * 0x2000)) & 0xffff;
 	args->hblanke = args->htotal - 1;
+
+	/*
+	 * If output is vga instead of digital then vtotal/htotal is invalid
+	 * so we have to give up and trigger the timestamping fallback in the
+	 * drm core.
+	 */
+	if (!args->vtotal || !args->htotal)
+		return -ENOTSUPP;
 
 	args->time[0] = ktime_to_ns(ktime_get());
 	line = nv_rd32(priv, 0x600868 + (head * 0x2000));
@@ -138,13 +146,13 @@ nv04_disp_ctor(struct nouveau_object *parent, struct nouveau_object *engine,
 	return 0;
 }
 
-struct nouveau_oclass
-nv04_disp_oclass = {
-	.handle = NV_ENGINE(DISP, 0x04),
-	.ofuncs = &(struct nouveau_ofuncs) {
+struct nouveau_oclass *
+nv04_disp_oclass = &(struct nouveau_disp_impl) {
+	.base.handle = NV_ENGINE(DISP, 0x04),
+	.base.ofuncs = &(struct nouveau_ofuncs) {
 		.ctor = nv04_disp_ctor,
 		.dtor = _nouveau_disp_dtor,
 		.init = _nouveau_disp_init,
 		.fini = _nouveau_disp_fini,
 	},
-};
+}.base;

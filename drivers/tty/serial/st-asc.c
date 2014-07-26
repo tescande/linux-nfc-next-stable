@@ -295,7 +295,7 @@ static void asc_receive_chars(struct uart_port *port)
 			status & ASC_STA_OE) {
 
 			if (c & ASC_RXBUF_FE) {
-				if (c == ASC_RXBUF_FE) {
+				if (c == (ASC_RXBUF_FE | ASC_RXBUF_DUMMY_RX)) {
 					port->icount.brk++;
 					if (uart_handle_break(port))
 						continue;
@@ -325,7 +325,7 @@ static void asc_receive_chars(struct uart_port *port)
 				flag = TTY_FRAME;
 		}
 
-		if (uart_handle_sysrq_char(port, c))
+		if (uart_handle_sysrq_char(port, c & 0xff))
 			continue;
 
 		uart_insert_char(port, c, ASC_RXBUF_DUMMY_OE, c & 0xff, flag);
@@ -547,7 +547,7 @@ static void asc_set_termios(struct uart_port *port, struct ktermios *termios,
 	ascport->port.read_status_mask = ASC_RXBUF_DUMMY_OE;
 	if (termios->c_iflag & INPCK)
 		ascport->port.read_status_mask |= ASC_RXBUF_FE | ASC_RXBUF_PE;
-	if (termios->c_iflag & (BRKINT | PARMRK))
+	if (termios->c_iflag & (IGNBRK | BRKINT | PARMRK))
 		ascport->port.read_status_mask |= ASC_RXBUF_DUMMY_BE;
 
 	/*
